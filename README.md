@@ -31,6 +31,20 @@ npm test
 npm run build
 ```
 
+## Android Performance Summary (Cathy ask)
+
+Writes **one new tab** on the existing tracking sheet — does not touch Cloud Run
+or other tabs.
+
+Needs the same `.env.local` tokens plus Google ADC (`gcloud auth application-default login`).
+
+```bash
+npm install
+npm run android-summary
+```
+
+Then open the [tracking sheet](https://docs.google.com/spreadsheets/d/1KgagbkqKRQHVqK-P1yURh-GixzpG_mTgp6jW2QZMhsw/edit) → **Android Performance Summary**.
+
 ## Data window
 
 Default window matches Cathy’s `top_ads_retention.py`: **14 days ending 8 days
@@ -47,4 +61,4 @@ See [`slack/README.md`](slack/README.md). Dashboard + API first; BDK Slack bot n
 | `META_ACCESS_TOKEN` | Spend, insights, thumbnails |
 | `ADJUST_API_TOKEN` | Installs + retained_users_d1/d3/d7 |
 | `META_USER_TOKEN` | **Not** needed (read-only) |
-| Google ADC | Only if/when Drive originals are added for previews |
+| Google ADC | Android sheet writer + future Drive originals |

@@ -7,9 +7,11 @@
     "build": "next build",
     "start": "next start --port 43127",
     "lint": "eslint",
-    "test": "tsx --test src/lib/*.test.ts"
+    "test": "tsx --test src/lib/*.test.ts",
+    "android-summary": "tsx scripts/write-android-performance-summary.mts"
   },
   "dependencies": {
+    "googleapis": "^160.0.0",
     "next": "^16.4.1",
     "react": "19.1.0",
     "react-dom": "19.1.0",
