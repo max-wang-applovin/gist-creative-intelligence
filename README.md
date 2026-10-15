@@ -33,7 +33,7 @@ npm run build
 
 ## Data window
 
-Default window matches Cathy's `top_ads_retention.py`: **14 days ending 8 days
+Default window matches Cathy’s `top_ads_retention.py`: **14 days ending 8 days
 ago**, so D7 cohorts are mature.
 
 ## Slack
