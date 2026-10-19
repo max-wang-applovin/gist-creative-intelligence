@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Creative Intelligence</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-mark">CI</div>
+        <nav aria-label="Primary">
+          <button class="nav-item active" title="Creative library">
+            <span>▦</span><small>Creatives</small>
+          </button>
+        </nav>
+        <div class="sidebar-foot">Gist</div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">GIST · META + ADJUST</p>
+            <h1>Creative Intelligence</h1>
+          </div>
+          <div class="topbar-actions">
+            <span id="freshness" class="freshness">Loading live data…</span>
+            <button id="refreshButton" class="icon-button" title="Refresh">↻</button>
+          </div>
+        </header>
+
+        <section class="tabs" aria-label="Dashboard tabs">
+          <button class="tab active" data-page="library">Top Creatives</button>
+          <button class="tab" data-page="analysis">Ad Analysis</button>
+          <button class="tab" data-page="inspiration">Competitor Inspo</button>
+        </section>
+
+        <div id="libraryPage">
+        <section class="filter-panel" aria-label="Filters">
+          <div class="filter-row primary-filters">
+            <label>
+              <span>Date window</span>
+              <select id="datePreset">
+                <option value="7">Last 7 complete days</option>
+                <option value="14">Last 14 complete days</option>
+                <option value="30">Last 30 complete days</option>
+                <option value="custom">Custom range</option>
+              </select>
+            </label>
+            <div id="customDates" class="custom-dates hidden">
+              <label><span>From</span><input id="sinceDate" type="date" /></label>
+              <label><span>To</span><input id="untilDate" type="date" /></label>
+              <button id="applyDates" class="button">Apply</button>
+            </div>
+            <label>
+              <span>Audience</span>
+              <select id="audienceSlice" disabled>
+                <option value="all">Audience All</option>
+              </select>
+            </label>
+            <label>
+              <span>Demographic</span>
+              <select id="demographicSlice" disabled>
+                <option value="all">Demographic All</option>
+              </select>
+            </label>
+            <label>
+              <span>Device</span>
+              <select id="deviceSlice" disabled>
+                <option value="all">Device All</option>
+              </select>
+            </label>
+            <label>
+              <span>Operating system</span>
+              <select id="osSlice" disabled>
+                <option value="all">OS All</option>
+              </select>
+            </label>
+            <label>
+              <span>Sort by</span>
+              <select id="sortMetric">
+                <option value="spend">Amount spent</option>
+                <option value="installs">Installs</option>
+                <option value="cpi">Lowest CPI</option>
+                <option value="cvr">Highest CVR</option>
+                <option value="ctr">Highest CTR</option>
+                <option value="d7">Highest D7</option>
+              </select>
+            </label>
+            <label>
+              <span>Media</span>
+              <select id="mediaType">
+                <option value="all">Video + image</option>
+                <option value="video">Video only</option>
+                <option value="image">Images only</option>
+                <option value="missing">Missing preview</option>
+              </select>
+            </label>
+            <label>
+              <span>Performance slice</span>
+              <select id="performanceSlice">
+                <option value="all">All creatives</option>
+                <option value="scale">Scale · $5k+</option>
+                <option value="efficient">Efficient · CPI ≤ $20</option>
+                <option value="retention">Retention · D7 ≥ 12%</option>
+                <option value="watch">Watch · CPI ≥ $25</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="filter-row secondary-filters">
+            <label class="search-box">
+              <span class="sr-only">Search</span>
+              <span aria-hidden="true">⌕</span>
+              <input id="searchInput" type="search" placeholder="Search creative or Meta alias…" />
+            </label>
+            <label>
+              <span>Minimum spend</span>
+              <select id="minimumSpend">
+                <option value="0">Any spend</option>
+                <option value="500">$500+</option>
+                <option value="1000">$1k+</option>
+                <option value="5000">$5k+</option>
+                <option value="10000">$10k+</option>
+              </select>
+            </label>
+            <div class="group-chip"><span>Group by</span> Adjust creative</div>
+            <div id="resultCount" class="result-count">— results</div>
+          </div>
+        </section>
+
+        <section id="summaryStrip" class="summary-strip" aria-label="Window totals"></section>
+        <div id="warning" class="warning hidden" role="status"></div>
+        <div id="sliceNotice" class="slice-notice hidden" role="status"></div>
+        <div id="loading" class="loading-state">
+          <div class="spinner"></div>
+          <p>Joining creative performance and media…</p>
+        </div>
+        <section id="creativeGrid" class="creative-grid" aria-live="polite"></section>
+        </div>
+
+        <section id="analysisPage" class="analysis-page hidden">
+          <header class="analysis-toolbar">
+            <div>
+              <p class="eyebrow">CREATIVE REVIEW</p>
+              <h2>Ad Analysis</h2>
+              <p id="analysisCoverage">Loading scan coverage…</p>
+            </div>
+            <div class="scan-controls">
+              <select id="scanLimit" aria-label="Number of creatives to scan">
+                <option value="5">Top 5</option>
+                <option value="20" selected>Top 20</option>
+                <option value="50">Top 50</option>
+                <option value="100">Top 100</option>
+                <option value="1000">Up to 1,000</option>
+                <option value="10000">Up to 10,000</option>
+              </select>
+              <button id="scanButton" class="analysis-primary">Scan creatives</button>
+              <button id="rescanButton" class="analysis-secondary">Rescan</button>
+            </div>
+          </header>
+          <div id="scanProgress" class="scan-progress hidden"></div>
+          <nav class="analysis-report-nav" aria-label="Analysis reports">
+            <button class="active" data-analysis-report="overview">Overview</button>
+            <button data-analysis-report="hooks">Top Hooks</button>
+            <button data-analysis-report="clicks">Top Clicks</button>
+            <button data-analysis-report="copy">Top Copy</button>
+            <button data-analysis-report="retention">Retention Leaders</button>
+            <button data-analysis-report="landing">Landing Pages</button>
+            <button data-analysis-report="data">Data Views</button>
+          </nav>
+          <div id="analysisOverview">
+          <div id="analysisSummary" class="analysis-summary"></div>
+          <div class="analysis-columns">
+            <section class="analysis-card">
+              <div class="analysis-card-title">What is working</div>
+              <div id="workingCreatives"></div>
+            </section>
+            <section class="analysis-card">
+              <div class="analysis-card-title">What needs work</div>
+              <div id="watchCreatives"></div>
+            </section>
+          </div>
+          <section class="analysis-card retention-leaders-card">
+            <div class="analysis-card-title">Highest-retention creatives</div>
+            <div id="retentionLeadersOverview" class="retention-columns"></div>
+          </section>
+          <section class="analysis-card concepts-card">
+            <div class="analysis-card-title">Spend by concept</div>
+            <div id="conceptBreakdown"></div>
+          </section>
+          <section class="analysis-card concepts-card">
+            <div class="analysis-card-title">Color theory</div>
+            <div id="colorTheoryBreakdown"></div>
+          </section>
+          <section class="analysis-card video-card">
+            <div class="analysis-card-title">Video funnel · raw Meta metrics</div>
+            <div id="videoFunnel"></div>
+          </section>
+          <section class="analysis-card recipe-card">
+            <div class="analysis-card-title">Winner’s recipe</div>
+            <div id="winnerRecipe"></div>
+          </section>
+          <section class="analysis-card data-view-card">
+            <div class="analysis-card-title">Detailed data view</div>
+            <div id="detailedDataView" class="data-table-wrap"></div>
+          </section>
+          </div>
+          <section id="analysisReportView" class="analysis-card report-view hidden"></section>
+        </section>
+
+        <section id="inspirationPage" class="analysis-page hidden">
+          <header class="analysis-toolbar">
+            <div>
+              <p class="eyebrow">PUBLIC CREATIVE LIBRARIES</p>
+              <h2>Competitor Inspiration</h2>
+              <p>Top active creatives from adjacent social platforms, ranked by public Meta transparency views.</p>
+            </div>
+            <div class="scan-controls">
+              <select id="competitorBrand" aria-label="Filter competitor brand">
+                <option value="all">All adjacent brands</option>
+              </select>
+              <button id="refreshCompetitors" class="analysis-secondary">Refresh</button>
+            </div>
+          </header>
+          <div id="competitorDisclosure" class="scan-progress">Loading public competitor creatives…</div>
+          <div id="inspirationQueries" class="inspiration-grid"></div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="detailDialog">
+      <button id="closeDialog" class="dialog-close" aria-label="Close">×</button>
+      <div id="dialogContent"></div>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
