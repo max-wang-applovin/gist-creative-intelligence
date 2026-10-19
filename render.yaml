@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: gist-creative-intelligence
+    runtime: node
+    region: oregon
+    plan: 0.5c-512mb
+    buildCommand: npm install && npm run check
+    startCommand: npm start
+    healthCheckPath: /healthz
+    disk:
+      name: creative-intelligence-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DASHBOARD_DATA_DIR
+        value: /var/data
+      - key: DASHBOARD_USERNAME
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: META_AD_ACCOUNT_ID
+        value: act_990337856783605
+      - key: ADJUST_API_TOKEN
+        sync: false
+      - key: ADJUST_APP_NAME
+        value: Gist
+      - key: ADMANAGE_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_ANALYSIS_MODEL
+        value: gpt-4.1-mini
+      - key: CREATIVE_SCAN_AUTO
+        value: "true"
+      - key: CREATIVE_SCAN_DAILY_LIMIT
+        value: "500"
+      - key: CREATIVE_SCAN_HOUR_UTC
+        value: "7"
+      - key: CREATIVE_SCAN_DAYS
+        value: "30"
+      - key: CREATIVE_SCAN_FORCE_DAILY
+        value: "false"
+      - key: CREATIVE_SCAN_CONCURRENCY
+        value: "2"

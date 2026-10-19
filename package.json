@@ -1,30 +1,24 @@
 {
-  "name": "gist-creative-intelligence",
-  "version": "0.1.0",
+  "name": "creative-intelligence",
   "private": true,
+  "type": "module",
+  "description": "Read-only Meta + Adjust creative intelligence dashboard and Slack helper",
   "scripts": {
-    "dev": "next dev --turbopack --port 43127",
-    "build": "next build",
-    "start": "next start --port 43127",
-    "lint": "eslint",
-    "test": "tsx --test src/lib/*.test.ts"
+    "check": "tsc --noEmit",
+    "dev": "bdk dev",
+    "dashboard": "tsx dashboard/server.ts",
+    "start": "tsx dashboard/server.ts"
+  },
+  "engines": {
+    "node": ">=22.14.0"
   },
   "dependencies": {
-    "next": "^16.4.1",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "zod": "^3.25.76"
+    "@cursor/bdk": "^0.2.25",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3",
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "^15.5.4",
-    "tailwindcss": "^4",
-    "tsx": "^4.20.5",
-    "typescript": "^5"
+    "@types/node": "^22.14.0",
+    "tsx": "^4.23.15",
+    "typescript": "6.0.3"
   }
 }
