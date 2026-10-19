@@ -1,50 +1,60 @@
-# Gist Creative Intelligence
+# Creative Intelligence
 
-Read-only creative performance for Gist UA:
+Read-only Meta Ads + Adjust creative intelligence dashboard with live creative previews, retention reporting, delivery slices, and AI analysis.
 
-- Native creative thumbnails (Meta)
-- Meta spend + install proxy (LEAD)
-- Adjust installs and **D1 / D3 / D7** retention
-- Join on **Meta `ad_id` = Adjust `creative_id_network`**
-- Group/filter by value prop, message, hook, visual treatment, format, creator, campaign
-- Parsed tags from the Gist naming convention, with human corrections saved under `data/tag-overrides.json`
+## Render deployment
 
-TikTok / AppLovin come later. This product does **not** change budgets, statuses, or ads.
+This `render-dashboard` branch is configured for an always-on Render Node service with a 1 GB persistent disk.
 
-Sister workstream for partnership Post ID launches lives on
-`cathy-sun-applovin/gist-ua` branch `cursor/partnership-post-id-4949`.
+1. Create a Render Blueprint from this repository and select `render-dashboard`, or configure a Web Service from `render.yaml`.
+2. Enter every variable marked `sync: false` when Render prompts. Never commit API keys to GitHub.
+3. Choose a unique `DASHBOARD_USERNAME` and a `DASHBOARD_PASSWORD` of at least 12 characters.
+4. Deploy and open `/healthz` to confirm the service is healthy.
 
-## Quick start
+Render injects `PORT`; the server listens on it automatically. Persistent analysis and schedule state is written to `/var/data`. Production startup fails closed when dashboard credentials are missing.
+
+For a manually configured Render Web Service use:
+
+```text
+Branch: render-dashboard
+Build Command: npm install && npm run check
+Start Command: npm start
+Health Check Path: /healthz
+```
+
+Use the `0.5c-512mb` paid compute plan and mount a 1 GB disk at `/var/data`.
+
+## Local dashboard
 
 ```bash
-cp .env.example .env.local
-# fill META_ACCESS_TOKEN and ADJUST_API_TOKEN (from Cathy / gist-ua .env)
 npm install
-npm run dev
+cp .env.example .env.local
+npm run dashboard
+# http://127.0.0.1:4173
 ```
 
-Open [http://127.0.0.1:43127](http://127.0.0.1:43127). Without tokens the API
-serves labeled **mock** data so the UI is usable.
+## Hosting environment
+
+| Variable | Purpose |
+| --- | --- |
+| `META_ACCESS_TOKEN` | Meta Marketing API user/system token |
+| `META_AD_ACCOUNT_ID` | Ad account id (`act_…` or bare digits) |
+| `ADJUST_API_TOKEN` | Adjust Report Service bearer token |
+| `ADJUST_APP_NAME` | Optional app-name filter |
+| `OPENAI_API_KEY` | Enables vision-based creative scans |
+| `OPENAI_ANALYSIS_MODEL` | Scan model, default `gpt-4.1-mini` |
+| `ADMANAGE_API_KEY` | Read-only AdScan feed and direct video fallback |
+| `DASHBOARD_USERNAME` | Shared dashboard login; required in production |
+| `DASHBOARD_PASSWORD` | Shared password, minimum 12 characters; required in production |
+| `DASHBOARD_DATA_DIR` | Persistent state directory; `/var/data` on Render |
+| `CREATIVE_SCAN_DAILY_LIMIT` | Daily cap, default 500 and max 10,000 |
+| `CREATIVE_SCAN_FORCE_DAILY` | Set `false` to skip unchanged creatives |
+
+Automatic scans default to 500 creatives and skip unchanged fingerprints to control OpenAI usage.
+
+## Verify
 
 ```bash
-npm test
-npm run build
+npm run check
+npm start
 ```
-
-## Data window
-
-Default window matches Cathy’s `top_ads_retention.py`: **14 days ending 8 days
-ago**, so D7 cohorts are mature.
-
-## Slack
-
-See [`slack/README.md`](slack/README.md). Dashboard + API first; BDK Slack bot next.
-
-## Secrets
-
-| Key | Needed for |
-|---|---|
-| `META_ACCESS_TOKEN` | Spend, insights, thumbnails |
-| `ADJUST_API_TOKEN` | Installs + retained_users_d1/d3/d7 |
-| `META_USER_TOKEN` | **Not** needed (read-only) |
-| Google ADC | Only if/when Drive originals are added for previews |
