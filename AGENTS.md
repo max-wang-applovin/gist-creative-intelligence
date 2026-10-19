@@ -1,9 +1,29 @@
-<!-- BEGIN:nextjs-agent-rules -->
+# Creative Intelligence
 
-## This is NOT the Next.js you know
+Bot Development Kit (BDK) project (`@cursor/bdk`). This file is for coding agents editing the project. The served agent's prompt is `bot/instructions.md`.
 
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+## Loop
 
-This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+```bash
+npx @cursor/bdk validate --dir .
+npx @cursor/bdk info --dir . --json
+npx @cursor/bdk run --dir . --message "..."
+npx @cursor/bdk eval --dir .
+npm run check
+```
 
-<!-- END:nextjs-agent-rules -->
+Run the CLI under Node, never Bun.
+
+## Layout
+
+- `bot/instructions.md` is the always-on prompt.
+- `bot/tools/<name>.ts` is one tool per file.
+- `bot/lib/` holds Meta/Adjust clients, fixtures, and the dashboard join.
+- `dashboard/` is the AdManage-style visual library (`npm run dashboard`).
+- `evals/` is filesystem evals.
+
+## Safety
+
+- Keep Meta and Adjust operations read-only.
+- Never commit API credentials.
+- Production dashboard deployments must require authentication.
