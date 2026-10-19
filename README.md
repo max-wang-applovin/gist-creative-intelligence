@@ -4,9 +4,9 @@ Read-only Meta Ads + Adjust creative intelligence dashboard with live creative p
 
 ## Render deployment
 
-This `render-dashboard` branch is configured for an always-on Render Node service with a 1 GB persistent disk.
+The `main` branch is configured for an always-on Render Node service with a 1 GB persistent disk.
 
-1. Create a Render Blueprint from this repository and select `render-dashboard`, or configure a Web Service from `render.yaml`.
+1. Create a Render Blueprint from this repository and select `main`, or configure a Web Service from `render.yaml`.
 2. Enter every variable marked `sync: false` when Render prompts. Never commit API keys to GitHub.
 3. Choose a unique `DASHBOARD_USERNAME` and a `DASHBOARD_PASSWORD` of at least 12 characters.
 4. Deploy and open `/healthz` to confirm the service is healthy.
@@ -16,7 +16,7 @@ Render injects `PORT`; the server listens on it automatically. Persistent analys
 For a manually configured Render Web Service use:
 
 ```text
-Branch: render-dashboard
+Branch: main
 Build Command: npm install && npm run check
 Start Command: npm start
 Health Check Path: /healthz
