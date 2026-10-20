@@ -210,11 +210,15 @@ select:focus, input:focus { border-color: var(--accent); }
 .concept-dimensions { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
 .concept-dimension { padding: 11px; border: 1px solid #e3e7ec; border-radius: 8px; }
 .concept-dimension h4 { margin: 0 0 10px; font-size: 10px; text-transform: uppercase; }
-.concept-row { display: grid; grid-template-columns: minmax(80px,1fr) 1.6fr 52px; gap: 8px; align-items: center; margin: 8px 0; font-size: 9px; }
-.concept-row > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.concept-row > div { height: 7px; overflow: hidden; border-radius: 4px; background: #edf0f3; }
-.concept-row i { display: block; height: 100%; background: #326ff0; border-radius: 4px; }
-.concept-row strong { text-align: right; }
+.concept-row { margin: 11px 0; font-size: 9px; }
+.concept-row-main { display: grid; grid-template-columns: minmax(80px,1fr) 1.4fr 52px; gap: 8px; align-items: center; }
+.concept-row-main > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.concept-row-main > strong { text-align: right; }
+.concept-bar { height: 7px; overflow: hidden; border-radius: 4px; background: #edf0f3; }
+.concept-bar i { display: block; height: 100%; background: #326ff0; border-radius: 4px; }
+.concept-performance { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 5px; margin-top: 5px; padding-left: min(88px, 30%); }
+.concept-performance span { color: #7a8590; font-size: 7px; text-transform: uppercase; white-space: nowrap; }
+.concept-performance strong { margin-left: 2px; color: #26313c; font-size: 8px; font-weight: 750; text-transform: none; }
 .recipe-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; }
 .recipe-step { padding: 12px; border-radius: 8px; background: #f4f7fb; }
 .recipe-step span { color: #708090; font-size: 9px; text-transform: uppercase; }
