@@ -1118,6 +1118,45 @@ function analysisCreativeRow(row, analysis, mode) {
     </div>`;
 }
 
+function addGroupedPerformance(current, row) {
+  current.spend += row.metaSpend;
+  current.installs += row.adjustInstalls;
+  current.retainedD1 += row.adjustRetainedD1;
+  current.retentionDenD1 += row.adjustRetentionDenD1;
+  current.retainedD3 += row.adjustRetainedD3;
+  current.retentionDenD3 += row.adjustRetentionDenD3;
+  current.count += 1;
+}
+
+function groupedRetention(value, day) {
+  const retained = value[`retainedD${day}`];
+  const denominator = value[`retentionDenD${day}`];
+  if (!denominator) return { rate: "—", sample: "no mature cohort" };
+  return {
+    rate: pct((retained / denominator) * 100),
+    sample: `${integer(retained)}/${integer(denominator)} retained`,
+  };
+}
+
+function groupedPerformanceRow(name, value, maxSpend) {
+  const d1 = groupedRetention(value, 1);
+  const d3 = groupedRetention(value, 3);
+  const cpi = value.installs > 0 ? money(value.spend / value.installs) : "—";
+  return `
+    <div class="concept-row">
+      <div class="concept-row-main">
+        <span>${escapeHtml(name)}</span>
+        <div class="concept-bar"><i style="width:${(value.spend / maxSpend) * 100}%"></i></div>
+        <strong>${money(value.spend, true)}</strong>
+      </div>
+      <div class="concept-performance">
+        <span title="${integer(value.installs)} installs">CPI <strong>${cpi}</strong></span>
+        <span title="${escapeHtml(d1.sample)}">D1 <strong>${d1.rate}</strong></span>
+        <span title="${escapeHtml(d3.sample)}">D3 <strong>${d3.rate}</strong></span>
+      </div>
+    </div>`;
+}
+
 function conceptBreakdown(scannedRows, analyses) {
   const dimensions = [
     ["theme", "Theme"],
@@ -1132,9 +1171,16 @@ function conceptBreakdown(scannedRows, analyses) {
       const groups = new Map();
       for (const row of scannedRows) {
         const value = analyses.get(row.creativeId)?.taxonomy?.[key] || "other";
-        const current = groups.get(value) || { spend: 0, count: 0 };
-        current.spend += row.metaSpend;
-        current.count += 1;
+        const current = groups.get(value) || {
+          spend: 0,
+          installs: 0,
+          retainedD1: 0,
+          retentionDenD1: 0,
+          retainedD3: 0,
+          retentionDenD3: 0,
+          count: 0,
+        };
+        addGroupedPerformance(current, row);
         groups.set(value, current);
       }
       const sorted = [...groups.entries()]
@@ -1142,10 +1188,7 @@ function conceptBreakdown(scannedRows, analyses) {
         .slice(0, 6);
       const max = Math.max(...sorted.map(([, value]) => value.spend), 1);
       return `<div class="concept-dimension"><h4>${label}</h4>${sorted
-        .map(
-          ([name, value]) => `
-            <div class="concept-row"><span>${escapeHtml(name)}</span><div><i style="width:${(value.spend / max) * 100}%"></i></div><strong>${money(value.spend, true)}</strong></div>`,
-        )
+        .map(([name, value]) => groupedPerformanceRow(name, value, max))
         .join("")}</div>`;
     })
     .join("")}</div>`;
@@ -1165,9 +1208,16 @@ function colorTheoryBreakdown(scannedRows, analyses) {
       const groups = new Map();
       for (const row of scannedRows) {
         const value = analyses.get(row.creativeId)?.colorTheory?.[key] || "unscanned";
-        const current = groups.get(value) || { spend: 0, count: 0 };
-        current.spend += row.metaSpend;
-        current.count += 1;
+        const current = groups.get(value) || {
+          spend: 0,
+          installs: 0,
+          retainedD1: 0,
+          retentionDenD1: 0,
+          retainedD3: 0,
+          retentionDenD3: 0,
+          count: 0,
+        };
+        addGroupedPerformance(current, row);
         groups.set(value, current);
       }
       const sorted = [...groups.entries()].sort(
@@ -1175,10 +1225,7 @@ function colorTheoryBreakdown(scannedRows, analyses) {
       );
       const max = Math.max(...sorted.map(([, value]) => value.spend), 1);
       return `<div class="concept-dimension"><h4>${label}</h4>${sorted
-        .map(
-          ([name, value]) => `
-            <div class="concept-row"><span>${escapeHtml(name)}</span><div><i style="width:${(value.spend / max) * 100}%"></i></div><strong>${money(value.spend, true)}</strong></div>`,
-        )
+        .map(([name, value]) => groupedPerformanceRow(name, value, max))
         .join("")}</div>`;
     })
     .join("")}</div>`;
