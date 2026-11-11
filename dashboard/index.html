@@ -35,6 +35,7 @@
           <button class="tab active" data-page="library">Top Creatives</button>
           <button class="tab" data-page="analysis">Ad Analysis</button>
           <button class="tab" data-page="inspiration">Competitor Inspo</button>
+          <button class="tab" data-page="debrief">Test Debrief</button>
         </section>
 
         <div id="libraryPage">
@@ -227,6 +228,86 @@
           </header>
           <div id="competitorDisclosure" class="scan-progress">Loading public competitor creatives…</div>
           <div id="inspirationQueries" class="inspiration-grid"></div>
+        </section>
+
+        <section id="debriefPage" class="analysis-page hidden">
+          <header class="analysis-toolbar">
+            <div>
+              <p class="eyebrow">CREATIVE TESTING · META + ADJUST</p>
+              <h2>Test Debrief</h2>
+              <p id="debriefStatus">Open this tab to load test results.</p>
+            </div>
+            <div class="scan-controls debrief-controls">
+              <label class="debrief-since">
+                <span>Tested since</span>
+                <input id="debriefSince" type="date" value="2026-09-15" />
+              </label>
+              <button id="applyDebrief" class="analysis-secondary">Apply</button>
+              <button id="refreshDebrief" class="analysis-secondary">Refresh</button>
+            </div>
+          </header>
+          <div id="debriefWarning" class="scan-progress hidden" role="status"></div>
+          <div id="debriefLoading" class="analysis-empty hidden">
+            Pulling Adjust testing results and the Meta ad inventory… this can take up to a minute.
+          </div>
+          <div id="debriefContent" class="hidden">
+            <p id="debriefHeadline" class="debrief-headline"></p>
+            <div id="debriefSummary" class="analysis-summary"></div>
+            <section class="analysis-card debrief-card">
+              <div class="analysis-card-title">By source</div>
+              <div id="debriefSources" class="data-table-wrap debrief-table-wrap"></div>
+            </section>
+            <section class="analysis-card debrief-card">
+              <div class="analysis-card-title">Top 15 winners · lowest cost per sign-up</div>
+              <p id="debriefWinnersRule" class="debrief-rule"></p>
+              <div id="debriefWinners" class="data-table-wrap debrief-table-wrap"></div>
+            </section>
+            <section class="analysis-card debrief-card">
+              <div class="analysis-card-title">Top 15 losers · highest cost per sign-up</div>
+              <p id="debriefLosersRule" class="debrief-rule"></p>
+              <div id="debriefLosers" class="data-table-wrap debrief-table-wrap"></div>
+            </section>
+            <section class="analysis-card debrief-card">
+              <div class="analysis-card-title">Everything we tested · newest upload first</div>
+              <div class="debrief-filters">
+                <label class="search-box">
+                  <span class="sr-only">Search tested creatives</span>
+                  <span aria-hidden="true">⌕</span>
+                  <input id="debriefSearch" type="search" placeholder="Search name, creator, hook, ad set…" />
+                </label>
+                <label><span>Source</span><select id="debriefSourceFilter"><option value="all">All sources</option></select></label>
+                <label><span>Format</span><select id="debriefFormatFilter">
+                  <option value="all">Video + static</option>
+                  <option value="Video">Video</option>
+                  <option value="Static">Static</option>
+                </select></label>
+                <label><span>OS</span><select id="debriefOsFilter">
+                  <option value="all">All OS</option>
+                  <option value="iOS">iOS only</option>
+                  <option value="Android">Android only</option>
+                  <option value="Both">iOS + Android</option>
+                </select></label>
+                <label><span>Verdict</span><select id="debriefVerdictFilter">
+                  <option value="all">All verdicts</option>
+                  <option value="Winner">Winners</option>
+                  <option value="Loser">Losers</option>
+                  <option value="Middle">Middle</option>
+                  <option value="Learning">Still learning</option>
+                </select></label>
+                <label><span>Uploaded</span><select id="debriefUploadFilter">
+                  <option value="all">Any upload date</option>
+                  <option value="window">In this window</option>
+                  <option value="carryover">Before this window</option>
+                </select></label>
+                <div id="debriefCount" class="result-count">— results</div>
+              </div>
+              <div id="debriefAll" class="data-table-wrap debrief-table-wrap debrief-all"></div>
+            </section>
+            <details class="analysis-card debrief-card debrief-rules">
+              <summary>How winners and losers are decided</summary>
+              <ul id="debriefRules"></ul>
+            </details>
+          </div>
         </section>
       </main>
     </div>

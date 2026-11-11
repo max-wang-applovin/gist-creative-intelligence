@@ -296,6 +296,45 @@ select:focus, input:focus { border-color: var(--accent); }
 .library-links a { padding: 13px; border-radius: 8px; background: #f4f7fb; color: #26323e; text-decoration: none; font-size: 11px; font-weight: 700; }
 .library-links span { float: right; color: #2167ea; }
 
+.debrief-since { color: #68727d; }
+.scan-controls input[type="date"] { background: white; color: #222a32; border-color: #d9dee4; padding-right: 11px; color-scheme: light; }
+.debrief-controls { align-items: end; }
+.debrief-headline { margin: 0 0 12px; font-size: 15px; color: #26313c; }
+.debrief-card { margin-bottom: 12px; }
+.debrief-rule { margin: -6px 0 10px; color: #6e7883; font-size: 10px; }
+.debrief-table-wrap { max-height: none; }
+.debrief-all { max-height: 720px; }
+.debrief-table { width: 100%; font-size: 11px; }
+.debrief-table th { font-size: 9px; }
+.debrief-table tbody tr { cursor: default; }
+.debrief-table td { vertical-align: middle; }
+.debrief-table td small { display: block; margin-top: 2px; color: #7a8590; font-size: 9px; }
+.debrief-table .debrief-rank { width: 28px; color: #7d8791; text-align: center; }
+.debrief-table .debrief-creative { min-width: 260px; max-width: 340px; }
+.debrief-creative > div { display: flex; gap: 9px; align-items: center; }
+.debrief-creative img, .debrief-thumb-empty { flex: 0 0 auto; width: 40px; height: 50px; border-radius: 5px; object-fit: cover; background: #eef1f4; }
+.debrief-creative > div > div { min-width: 0; }
+.debrief-creative strong { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+.debrief-table .debrief-creative small { overflow: hidden; text-overflow: ellipsis; }
+.debrief-chips { display: flex; gap: 4px; margin-top: 4px; }
+.debrief-chip { display: inline-block; border-radius: 999px; padding: 2px 7px; font-size: 9px; font-weight: 700; background: #eef1f4; color: #55606b; }
+.debrief-chip.live, .debrief-chip.verdict-winner { background: #e3f6ec; color: #18724f; }
+.debrief-chip.promoted { background: #e5edfb; color: #185ecb; }
+.debrief-chip.carryover, .debrief-chip.verdict-learning { background: #fdf1de; color: #9a5d0c; }
+.debrief-chip.verdict-loser { background: #fde8e8; color: #b23a3a; }
+.debrief-reasons { min-width: 260px; text-align: left !important; white-space: normal; line-height: 1.45; color: #37424d; }
+.debrief-reasons div + div { margin-top: 3px; }
+.debrief-ref { max-width: 240px; overflow: hidden; text-align: left !important; text-overflow: ellipsis; }
+.debrief-ref small { display: inline !important; }
+.debrief-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 12px; }
+.debrief-filters label { color: #68727d; }
+.debrief-filters select { background: white; color: #222a32; border-color: #d9dee4; }
+.debrief-filters .search-box { background: white; border-color: #d9dee4; color: #68727d; }
+.debrief-filters .search-box input { color: #222a32; }
+.debrief-filters .result-count { color: #68727d; }
+.debrief-rules summary { cursor: pointer; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+.debrief-rules ul { margin: 10px 0 0; padding-left: 18px; color: #4d5864; font-size: 11px; line-height: 1.6; }
+
 .loading-state { min-height: 350px; display: grid; place-items: center; align-content: center; color: var(--muted); gap: 12px; }
 .spinner { width: 30px; height: 30px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

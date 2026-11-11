@@ -11,6 +11,8 @@ const state = {
   analysis: null,
   videoMetrics: null,
   competitors: null,
+  debrief: null,
+  debriefLoading: false,
   scanJob: null,
   analysisReport: "overview",
 };
@@ -1913,16 +1915,313 @@ async function loadVideoMetrics(params = currentRangeParams()) {
   }
 }
 
+const debriefDay = (value) =>
+  value
+    ? new Date(`${value}T00:00:00Z`).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        timeZone: "UTC",
+      })
+    : "—";
+const debriefShortDay = (value) =>
+  value
+    ? new Date(`${value}T00:00:00Z`).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        timeZone: "UTC",
+      })
+    : "—";
+const debriefMoney = (value) => (value == null ? "—" : money(value));
+const debriefPct = (value) => (value == null ? "—" : pct(value));
+
+function debriefChips(row) {
+  const chips = [
+    `<span class="debrief-chip ${row.status === "Live" ? "live" : "paused"}">${row.status}</span>`,
+  ];
+  if (row.promoted) chips.push('<span class="debrief-chip promoted">Promoted</span>');
+  if (row.carryover) {
+    chips.push(
+      `<span class="debrief-chip carryover" title="Uploaded ${escapeHtml(row.uploadedDate)}, before this window">Pre-window</span>`,
+    );
+  }
+  return chips.join("");
+}
+
+function debriefVerdictChip(row) {
+  return `<span class="debrief-chip verdict-${row.verdict.toLowerCase()}">${escapeHtml(row.verdict)}</span>`;
+}
+
+function debriefCreativeCell(row) {
+  const thumb = safeUrl(row.thumbnailUrl);
+  return `<td class="sticky-cell debrief-creative">
+    <div>
+      ${thumb ? `<img loading="lazy" src="${escapeHtml(thumb)}" alt="" />` : '<span class="debrief-thumb-empty"></span>'}
+      <div>
+        <strong title="${escapeHtml(row.name)}">${escapeHtml(row.readableName)}</strong>
+        <small title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</small>
+        <span class="debrief-chips">${debriefChips(row)}</span>
+      </div>
+    </div>
+  </td>`;
+}
+
+function debriefSpendCell(row) {
+  const extra =
+    row.spend - row.testingSpend >= 1
+      ? `<small>${money(row.testingSpend, true)} in testing</small>`
+      : "";
+  return `<td>${money(row.spend)}${extra}</td>`;
+}
+
+function debriefRankedTable(rows, emptyText) {
+  if (!rows.length) {
+    return `<div class="analysis-empty">${emptyText}</div>`;
+  }
+  const headers = [
+    "Creative",
+    "Source",
+    "Format",
+    "OS",
+    "Uploaded",
+    "Spend",
+    "Sign-ups",
+    "Cost / sign-up",
+    "D1",
+    "D3",
+    "Why",
+  ];
+  return `<table class="analysis-data-table debrief-table"><thead><tr><th class="debrief-rank">#</th>${headers
+    .map((header, index) => `<th class="${index === 0 ? "sticky-cell" : ""}">${header}</th>`)
+    .join("")}</tr></thead><tbody>${rows
+    .map(
+      (row, index) => `<tr>
+        <td class="debrief-rank">${index + 1}</td>
+        ${debriefCreativeCell(row)}
+        <td>${escapeHtml(row.source)}</td>
+        <td>${escapeHtml(row.format)}</td>
+        <td>${escapeHtml(row.os)}</td>
+        <td title="${escapeHtml(row.uploadedAt || "")}">${debriefShortDay(row.uploadedDate)}</td>
+        ${debriefSpendCell(row)}
+        <td>${integer(row.signups)}</td>
+        <td><strong>${debriefMoney(row.cpsu)}</strong></td>
+        <td>${debriefPct(row.d1)}</td>
+        <td>${debriefPct(row.d3)}</td>
+        <td class="debrief-reasons">${row.reasons.map((reason) => `<div>${escapeHtml(reason)}</div>`).join("")}</td>
+      </tr>`,
+    )
+    .join("")}</tbody></table>`;
+}
+
+function debriefSourceRef(item) {
+  if (!item) return "—";
+  return `<span title="${escapeHtml(item.name)}">${escapeHtml(item.readableName)}</span> <small>${
+    item.cpsu == null ? "no sign-ups" : `${money(item.cpsu)}/SU`
+  }</small>`;
+}
+
+function renderDebriefSources(sources) {
+  const headers = [
+    "Source",
+    "Tested",
+    "Spend",
+    "Testing spend",
+    "Sign-ups",
+    "Cost / sign-up",
+    "Winners",
+    "Losers",
+    "Learning",
+    "Promoted",
+    "Best",
+    "Worst",
+  ];
+  return `<table class="analysis-data-table debrief-table"><thead><tr>${headers
+    .map((header, index) => `<th class="${index === 0 ? "sticky-cell" : ""}">${header}</th>`)
+    .join("")}</tr></thead><tbody>${sources
+    .map(
+      (row) => `<tr>
+        <td class="sticky-cell"><strong>${escapeHtml(row.source)}</strong></td>
+        <td>${integer(row.tested)}</td>
+        <td>${money(row.spend, true)}</td>
+        <td>${money(row.testingSpend, true)}</td>
+        <td>${integer(row.signups)}</td>
+        <td><strong>${debriefMoney(row.cpsu)}</strong></td>
+        <td>${integer(row.winners)}</td>
+        <td>${integer(row.losers)}</td>
+        <td>${integer(row.learning)}</td>
+        <td>${integer(row.promoted)}</td>
+        <td class="debrief-ref">${debriefSourceRef(row.best)}</td>
+        <td class="debrief-ref">${debriefSourceRef(row.worst)}</td>
+      </tr>`,
+    )
+    .join("")}</tbody></table>`;
+}
+
+function filteredDebriefRows() {
+  const rows = state.debrief?.all ?? [];
+  const query = $("debriefSearch").value.trim().toLowerCase();
+  const source = $("debriefSourceFilter").value;
+  const format = $("debriefFormatFilter").value;
+  const os = $("debriefOsFilter").value;
+  const verdict = $("debriefVerdictFilter").value;
+  const upload = $("debriefUploadFilter").value;
+  return rows.filter((row) => {
+    if (source !== "all" && row.source !== source) return false;
+    if (format !== "all" && row.format !== format) return false;
+    if (os !== "all" && row.os !== os) return false;
+    if (verdict !== "all" && row.verdict !== verdict) return false;
+    if (upload === "window" && row.carryover) return false;
+    if (upload === "carryover" && !row.carryover) return false;
+    if (!query) return true;
+    return [row.name, row.readableName, row.creator, row.hook, ...row.adSets]
+      .join(" ")
+      .toLowerCase()
+      .includes(query);
+  });
+}
+
+function renderDebriefAll() {
+  if (!state.debrief) return;
+  const rows = filteredDebriefRows();
+  $("debriefCount").textContent = `${rows.length} of ${state.debrief.all.length} tested`;
+  if (!rows.length) {
+    $("debriefAll").innerHTML =
+      '<div class="analysis-empty">No tested creatives match these filters.</div>';
+    return;
+  }
+  const headers = [
+    "Creative",
+    "Uploaded",
+    "Source",
+    "Format",
+    "OS",
+    "Verdict",
+    "Spend",
+    "Sign-ups",
+    "Cost / sign-up",
+    "CPI",
+    "CTR",
+    "D1",
+    "D3",
+  ];
+  $("debriefAll").innerHTML = `<table class="analysis-data-table debrief-table"><thead><tr>${headers
+    .map((header, index) => `<th class="${index === 0 ? "sticky-cell" : ""}">${header}</th>`)
+    .join("")}</tr></thead><tbody>${rows
+    .map(
+      (row) => `<tr>
+        ${debriefCreativeCell(row)}
+        <td title="${escapeHtml(row.uploadedAt || "")}">${debriefShortDay(row.uploadedDate)}</td>
+        <td>${escapeHtml(row.source)}</td>
+        <td>${escapeHtml(row.format)}</td>
+        <td>${escapeHtml(row.os)}</td>
+        <td>${debriefVerdictChip(row)}</td>
+        ${debriefSpendCell(row)}
+        <td>${integer(row.signups)}</td>
+        <td><strong>${debriefMoney(row.cpsu)}</strong></td>
+        <td>${debriefMoney(row.cpi)}</td>
+        <td>${pct(row.ctr)}</td>
+        <td>${debriefPct(row.d1)}</td>
+        <td>${debriefPct(row.d3)}</td>
+      </tr>`,
+    )
+    .join("")}</tbody></table>`;
+}
+
+function renderDebrief() {
+  const data = state.debrief;
+  if (!data) return;
+  const s = data.summary;
+  $("debriefStatus").textContent =
+    `${debriefDay(s.since)} → ${debriefDay(s.until)} · Meta partner in ${data.adjustApp} · generated ${new Date(data.generatedAt).toLocaleString()}`;
+  $("debriefHeadline").innerHTML =
+    `<strong>${integer(s.tested)} creatives tested since ${debriefDay(s.since)}:</strong> ` +
+    `${integer(s.winners)} winners, ${integer(s.losers)} losers, ${integer(s.promoted)} promoted, ${integer(s.learning)} still learning.`;
+  $("debriefSummary").innerHTML = `
+    <div class="analysis-kpi primary"><span>Creatives tested</span><strong>${integer(s.tested)}</strong><p>${integer(s.middle)} decided in the middle · ${integer(s.carryover)} uploaded before ${debriefShortDay(s.since)}</p></div>
+    <div class="analysis-kpi"><span>Testing spend</span><strong>${money(s.testingSpend, true)}</strong><p>${money(s.spend, true)} including main campaigns</p></div>
+    <div class="analysis-kpi"><span>Cost per sign-up</span><strong>${debriefMoney(s.cpsu)}</strong><p>${integer(s.signups)} sign-ups across tested creatives · typical decided ${debriefMoney(data.typical.cpsu)}</p></div>
+    <div class="analysis-kpi"><span>Live now</span><strong>${integer(s.live)}</strong><p>${integer(s.paused)} paused · ${integer(s.promoted)} promoted to main</p></div>`;
+  $("debriefSources").innerHTML = renderDebriefSources(data.bySource);
+  $("debriefWinnersRule").textContent = data.rules.winners;
+  $("debriefLosersRule").textContent = data.rules.losers;
+  $("debriefWinners").innerHTML = debriefRankedTable(
+    data.winners,
+    "No creative has cleared the decision rule with 10+ sign-ups yet.",
+  );
+  $("debriefLosers").innerHTML = debriefRankedTable(
+    data.losers,
+    "No decided losers yet.",
+  );
+  $("debriefRules").innerHTML = Object.values(data.rules)
+    .map((rule) => `<li>${escapeHtml(rule)}</li>`)
+    .join("");
+
+  const sourceSelect = $("debriefSourceFilter");
+  const selected = sourceSelect.value;
+  sourceSelect.innerHTML =
+    '<option value="all">All sources</option>' +
+    data.bySource
+      .map(
+        (row) =>
+          `<option value="${escapeHtml(row.source)}">${escapeHtml(row.source)} (${row.tested})</option>`,
+      )
+      .join("");
+  if (data.bySource.some((row) => row.source === selected)) {
+    sourceSelect.value = selected;
+  }
+  renderDebriefAll();
+
+  $("debriefWarning").textContent = data.warnings.join(" ");
+  $("debriefWarning").classList.toggle("hidden", !data.warnings.length);
+  $("debriefContent").classList.remove("hidden");
+}
+
+async function loadDebrief(force = false) {
+  if (state.debriefLoading) return;
+  const since = $("debriefSince").value;
+  if (!force && state.debrief?.range.since === since) {
+    renderDebrief();
+    return;
+  }
+  state.debriefLoading = true;
+  $("debriefLoading").classList.remove("hidden");
+  $("debriefWarning").classList.add("hidden");
+  $("applyDebrief").disabled = true;
+  $("refreshDebrief").disabled = true;
+  $("debriefStatus").textContent = "Loading test results…";
+  try {
+    const params = new URLSearchParams();
+    if (since) params.set("since", since);
+    if (force) params.set("refresh", "1");
+    const response = await fetch(`/api/debrief?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Test debrief unavailable");
+    state.debrief = data;
+    renderDebrief();
+  } catch (error) {
+    $("debriefStatus").textContent = error.message;
+    $("debriefWarning").textContent = error.message;
+    $("debriefWarning").classList.remove("hidden");
+  } finally {
+    state.debriefLoading = false;
+    $("debriefLoading").classList.add("hidden");
+    $("applyDebrief").disabled = false;
+    $("refreshDebrief").disabled = false;
+  }
+}
+
 function switchPage(page) {
   state.page = page;
   $("libraryPage").classList.toggle("hidden", page !== "library");
   $("analysisPage").classList.toggle("hidden", page !== "analysis");
   $("inspirationPage").classList.toggle("hidden", page !== "inspiration");
+  $("debriefPage").classList.toggle("hidden", page !== "debrief");
   document.querySelectorAll("[data-page]").forEach((button) => {
     button.classList.toggle("active", button.dataset.page === page);
   });
   if (page === "analysis") void loadAnalysis();
   if (page === "inspiration") void loadCompetitors();
+  if (page === "debrief") void loadDebrief();
 }
 
 async function startScan(force) {
@@ -2032,6 +2331,16 @@ $("competitorBrand").addEventListener("change", renderCompetitors);
 $("refreshCompetitors").addEventListener("click", () =>
   void loadCompetitors(true),
 );
+$("applyDebrief").addEventListener("click", () => void loadDebrief());
+$("refreshDebrief").addEventListener("click", () => void loadDebrief(true));
+$("debriefSearch").addEventListener("input", renderDebriefAll);
+[
+  "debriefSourceFilter",
+  "debriefFormatFilter",
+  "debriefOsFilter",
+  "debriefVerdictFilter",
+  "debriefUploadFilter",
+].forEach((id) => $(id).addEventListener("change", renderDebriefAll));
 
 const initialPage = new URLSearchParams(window.location.search).get("page");
 const initialReport = new URLSearchParams(window.location.search).get("report");
@@ -2056,7 +2365,7 @@ if (
   state.analysisReport = initialReport;
 }
 switchPage(
-  ["library", "analysis", "inspiration"].includes(initialPage)
+  ["library", "analysis", "inspiration", "debrief"].includes(initialPage)
     ? initialPage
     : "library",
 );

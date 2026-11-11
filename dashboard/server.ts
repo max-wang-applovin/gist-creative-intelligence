@@ -31,6 +31,7 @@ import {
 } from "./analysis.js";
 import { fetchAdManageAssets } from "./admanage-assets.js";
 import { fetchAdjacentCompetitorCreatives } from "./competitors.js";
+import { buildDebriefPayload, resolveDebriefRange } from "./debrief.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "..");
@@ -987,6 +988,25 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
           range,
           url.searchParams.get("refresh") === "1",
         ),
+      );
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/debrief") {
+    try {
+      const range = resolveDebriefRange(
+        url.searchParams.get("since"),
+        url.searchParams.get("until"),
+      );
+      json(
+        res,
+        200,
+        await buildDebriefPayload(range, url.searchParams.get("refresh") === "1"),
       );
     } catch (error) {
       json(res, 400, {

@@ -39,19 +39,22 @@ function retentionPct(value: unknown): number {
   return Math.round(pct * 100) / 100;
 }
 
-type AdjustReportRow = {
+export type AdjustReportRow = {
   day?: string;
   creative_id?: string;
   creative_name?: string;
   creative?: string;
   creative_id_network?: string;
   creative_network?: string;
+  campaign_network?: string;
+  adgroup_network?: string;
   partner_name?: string;
   network?: string;
   network_cost?: number | string;
   impressions?: number | string;
   clicks?: number | string;
   installs?: number | string;
+  post_install_account_created_events?: number | string;
   revenue?: number | string;
   cost?: number | string;
   roas?: number | string;
@@ -155,7 +158,47 @@ function resolveApp(
   return apps[0]!;
 }
 
-function isMetaPartner(partner: string): boolean {
+/** Resolve the Adjust app (ADJUST_APP_TOKEN / ADJUST_APP_NAME) for report reads. */
+export async function resolveAdjustApp(
+  opts: { appToken?: string; appName?: string } = {},
+): Promise<{ apiToken: string; app: AdjustApp }> {
+  const apiToken = process.env.ADJUST_API_TOKEN?.trim();
+  if (!apiToken) throw new Error("ADJUST_API_TOKEN is not configured.");
+  return { apiToken, app: resolveApp(await listAdjustApps(apiToken), opts) };
+}
+
+/** One Report Service read for a resolved app; rows are returned unfiltered. */
+export async function fetchAdjustReportRows(
+  apiToken: string,
+  appToken: string,
+  range: DateRange,
+  dimensions: string[],
+  metrics: string[],
+  label = "Adjust Report API",
+): Promise<AdjustReportRow[]> {
+  const url = new URL("https://automate.adjust.com/reports-service/report");
+  url.searchParams.set("app_token__in", appToken);
+  url.searchParams.set("date_period", `${range.since}:${range.until}`);
+  url.searchParams.set("dimensions", dimensions.join(","));
+  url.searchParams.set("metrics", metrics.join(","));
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      Accept: "application/json",
+    },
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`${label} ${response.status}: ${body.slice(0, 400)}`);
+  }
+  const payload = (await response.json()) as {
+    rows?: AdjustReportRow[];
+    data?: AdjustReportRow[];
+  };
+  return payload.rows ?? payload.data ?? [];
+}
+
+export function isMetaPartner(partner: string): boolean {
   const p = partner.toLowerCase();
   return (
     p.includes("facebook") ||
@@ -187,7 +230,7 @@ export function cleanAdjustCreativeName(raw: string): string {
  * Last mature Adjust UTC calendar cohort day. D1 for cohort day T observes
  * activity on calendar day T+1 and becomes final when that UTC day closes.
  */
-function fullMatureCutoff(day: 1 | 3 | 7, asOf = new Date()): string {
+export function fullMatureCutoff(day: 1 | 3 | 7, asOf = new Date()): string {
   const cutoff = new Date(asOf);
   cutoff.setUTCHours(0, 0, 0, 0);
   cutoff.setUTCDate(cutoff.getUTCDate() - (day + 1));
@@ -356,34 +399,23 @@ export async function fetchAdjustCreativePerformance(
   const appsAvailable = await listAdjustApps(apiToken);
   const app = resolveApp(appsAvailable, opts);
 
-  const url = new URL("https://automate.adjust.com/reports-service/report");
-  url.searchParams.set("app_token__in", app.token);
-  url.searchParams.set("date_period", `${range.since}:${range.until}`);
-  url.searchParams.set(
-    "dimensions",
-    "creative_id_network,creative,creative_network,partner_name",
+  const raw = await fetchAdjustReportRows(
+    apiToken,
+    app.token,
+    range,
+    ["creative_id_network", "creative", "creative_network", "partner_name"],
+    [
+      "installs",
+      "network_cost",
+      "impressions",
+      "clicks",
+      "revenue",
+      "roas",
+      "retention_rate_d1",
+      "retention_rate_d3",
+      "retention_rate_d7",
+    ],
   );
-  url.searchParams.set(
-    "metrics",
-    "installs,network_cost,impressions,clicks,revenue,roas,retention_rate_d1,retention_rate_d3,retention_rate_d7",
-  );
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${apiToken}`,
-      Accept: "application/json",
-    },
-  });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Adjust Report API ${response.status}: ${body.slice(0, 400)}`);
-  }
-
-  const payload = (await response.json()) as {
-    rows?: AdjustReportRow[];
-    data?: AdjustReportRow[];
-  };
-  const raw = payload.rows ?? payload.data ?? [];
   const mapped: AdjustCreativeRow[] = [];
   for (const row of raw) {
     const network = row.partner_name?.trim() || row.network?.trim() || "unknown";
@@ -436,44 +468,20 @@ export async function fetchAdjustCreativePerformance(
   // Retention rates need their own mature cohort denominators. Pull daily
   // retained-user numerators and count installs only for fully mature cohort
   // days; weighting aggregate rates by all installs biases newer creatives.
-  const retentionUrl = new URL(
-    "https://automate.adjust.com/reports-service/report",
+  const retentionRows = await fetchAdjustReportRows(
+    apiToken,
+    app.token,
+    range,
+    ["day", "creative_id_network", "creative", "partner_name"],
+    ["installs", "retained_users_d1", "retained_users_d3", "retained_users_d7"],
+    "Adjust retention cohorts",
   );
-  retentionUrl.searchParams.set("app_token__in", app.token);
-  retentionUrl.searchParams.set(
-    "date_period",
-    `${range.since}:${range.until}`,
-  );
-  retentionUrl.searchParams.set(
-    "dimensions",
-    "day,creative_id_network,creative,partner_name",
-  );
-  retentionUrl.searchParams.set(
-    "metrics",
-    "installs,retained_users_d1,retained_users_d3,retained_users_d7",
-  );
-  const retentionResponse = await fetch(retentionUrl, {
-    headers: {
-      Authorization: `Bearer ${apiToken}`,
-      Accept: "application/json",
-    },
-  });
-  if (!retentionResponse.ok) {
-    const body = await retentionResponse.text();
-    throw new Error(
-      `Adjust retention cohorts ${retentionResponse.status}: ${body.slice(0, 400)}`,
-    );
-  }
-  const retentionPayload = (await retentionResponse.json()) as {
-    rows?: AdjustReportRow[];
-    data?: AdjustReportRow[];
-  };
   const cutoffs = {
     1: fullMatureCutoff(1),
     3: fullMatureCutoff(3),
     7: fullMatureCutoff(7),
   };
-  for (const row of retentionPayload.rows ?? retentionPayload.data ?? []) {
+  for (const row of retentionRows) {
     const network = row.partner_name?.trim() || row.network?.trim() || "unknown";
     if (partnerMode === "meta" && !isMetaPartner(network)) continue;
     const creativeId = row.creative_id_network?.trim();
