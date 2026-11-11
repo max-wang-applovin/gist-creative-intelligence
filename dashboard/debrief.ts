@@ -6,12 +6,18 @@ import {
   resolveAdjustApp,
   type AdjustReportRow,
 } from "../bot/lib/adjust.js";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { defaultDateRange } from "../bot/lib/dates.js";
 import { normalizeCreativeName } from "../bot/lib/names.js";
 
 export const DEFAULT_DEBRIEF_SINCE = "2026-09-15";
 const MAX_DEBRIEF_DAYS = 180;
 const CACHE_TTL_MS = 30 * 60_000;
+const snapshotDirectory = resolve(
+  process.env.DASHBOARD_DATA_DIR?.trim() || ".agent-serve",
+  "debrief",
+);
 
 /** Max's decision rule: decide at 7 days or $350, whichever comes first. */
 const DECISION_SPEND = 350;
@@ -34,6 +40,7 @@ export type DebriefSource =
   | "Other";
 export type DebriefVerdict = "Winner" | "Loser" | "Middle" | "Learning";
 export type RetentionConfidence = "Low" | "Medium" | "High" | null;
+export type DebriefAction = "Scale" | "Pause" | "Iterate" | "Wait";
 
 export type DebriefStageMetrics = {
   spend: number;
@@ -106,6 +113,10 @@ export type DebriefCreative = {
   retentionCost: number | null;
   retentionCostIndex: number | null;
   retentionConfidence: RetentionConfidence;
+  recommendedAction: DebriefAction;
+  actionReason: string;
+  spendToDecision: number;
+  daysToDecision: number | null;
   retainedD1: number;
   retainedD3: number;
   retainedD7: number;
@@ -163,6 +174,11 @@ export type DebriefSourceSummary = {
 
 export type DebriefPayload = {
   generatedAt: string;
+  freshness?: {
+    source: "live" | "memory" | "disk";
+    refreshing: boolean;
+    expiresAt: string;
+  };
   adjustApp: string;
   range: { since: string; until: string };
   summary: {
@@ -217,6 +233,7 @@ export type DebriefPayload = {
   losers: DebriefCreative[];
   retentionRisks: DebriefCreative[];
   scaledValidation: DebriefCreative[];
+  decisions: DebriefCreative[];
   all: DebriefCreative[];
   warnings: string[];
 };
@@ -1025,6 +1042,18 @@ async function buildDebrief(range: {
       retentionCost: testing.retentionCost,
       retentionCostIndex: null,
       retentionConfidence: testing.confidence,
+      recommendedAction: "Wait",
+      actionReason: "Waiting for enough testing evidence.",
+      spendToDecision: round2(
+        Math.max(
+          0,
+          (daysLive !== null && daysLive >= DECISION_DAYS
+            ? DECISION_MIN_SPEND_AT_DAYS
+            : DECISION_SPEND) - testing.spend,
+        ),
+      ),
+      daysToDecision:
+        daysLive === null ? null : Math.max(0, DECISION_DAYS - daysLive),
       retainedD1: overall.retainedD1,
       retainedD3: overall.retainedD3,
       retainedD7: overall.retainedD7,
@@ -1212,6 +1241,59 @@ async function buildDebrief(range: {
       return aRate / aBase - bRate / bBase || compareBestFirst(a, b);
     })
     .slice(0, LIST_SIZE);
+  const retentionRiskSet = new Set(retentionRisks);
+  const winnerSetForAction = new Set(winners);
+  const loserSetForAction = new Set(losers);
+  for (const creative of tested) {
+    if (retentionRiskSet.has(creative)) {
+      creative.recommendedAction = "Iterate";
+      creative.actionReason =
+        "Testing sign-ups are efficient, but mature retention is below its benchmark.";
+    } else if (winnerSetForAction.has(creative)) {
+      creative.recommendedAction = "Scale";
+      creative.actionReason =
+        "Testing retained-user cost ranks among the best with sufficient confidence.";
+    } else if (loserSetForAction.has(creative)) {
+      const severe =
+        creative.testing.signups === 0 ||
+        (creative.retentionCostIndex ?? 0) >= 1.5;
+      creative.recommendedAction = severe ? "Pause" : "Iterate";
+      creative.actionReason = severe
+        ? "Testing retained-user cost is materially above benchmark."
+        : "Testing performance is below benchmark but has a recoverable signal.";
+    } else if (!creative.eligible) {
+      creative.recommendedAction = "Wait";
+      creative.actionReason =
+        creative.spendToDecision > 0
+          ? `${fmtMoney(creative.spendToDecision)} more testing spend needed, or wait ${creative.daysToDecision ?? "—"} day(s).`
+          : "Waiting for the testing decision window.";
+    } else if (
+      creative.retentionConfidence === "Low" ||
+      creative.retentionConfidence === null
+    ) {
+      creative.recommendedAction = "Wait";
+      creative.actionReason =
+        "Testing spend threshold is met, but the mature retention cohort is not yet large enough.";
+    } else {
+      creative.recommendedAction = "Iterate";
+      creative.actionReason =
+        "Testing evidence is mature but does not rank as a clear winner or loser.";
+    }
+  }
+  const actionPriority: Record<DebriefAction, number> = {
+    Scale: 0,
+    Pause: 1,
+    Iterate: 2,
+    Wait: 3,
+  };
+  const decisions = [...tested].sort(
+    (a, b) =>
+      actionPriority[a.recommendedAction] -
+        actionPriority[b.recommendedAction] ||
+      (a.retentionCostIndex ?? Number.POSITIVE_INFINITY) -
+        (b.retentionCostIndex ?? Number.POSITIVE_INFINITY) ||
+      b.testing.spend - a.testing.spend,
+  );
 
   const benchmarkAverage = benchmarkForRows(
     "Eligible testing weighted average",
@@ -1387,6 +1469,7 @@ async function buildDebrief(range: {
           b.scaled.spend - a.scaled.spend ||
           compareBestFirst(a, b),
       ),
+    decisions,
     all,
     warnings,
   };
@@ -1395,21 +1478,154 @@ async function buildDebrief(range: {
 const cache = new Map<string, { expiresAt: number; value: DebriefPayload }>();
 const inflight = new Map<string, Promise<DebriefPayload>>();
 
-export async function buildDebriefPayload(
+type DebriefSnapshot = {
+  version: 1;
+  savedAt: string;
+  range: { since: string; until: string };
+  value: DebriefPayload;
+};
+
+function debriefKey(range: { since: string; until: string }): string {
+  return `${range.since}:${range.until}`;
+}
+
+function snapshotPath(range: { since: string; until: string }): string {
+  return join(snapshotDirectory, `${range.since}_${range.until}.json`);
+}
+
+async function readSnapshot(range: {
+  since: string;
+  until: string;
+}): Promise<{ savedAt: number; value: DebriefPayload } | null> {
+  try {
+    const parsed = JSON.parse(
+      await readFile(snapshotPath(range), "utf8"),
+    ) as DebriefSnapshot;
+    const savedAt = Date.parse(parsed.savedAt);
+    if (
+      parsed.version !== 1 ||
+      parsed.range.since !== range.since ||
+      parsed.range.until !== range.until ||
+      !Number.isFinite(savedAt) ||
+      !parsed.value?.generatedAt
+    ) {
+      return null;
+    }
+    delete parsed.value.freshness;
+    return { savedAt, value: parsed.value };
+  } catch {
+    return null;
+  }
+}
+
+async function writeSnapshot(
   range: { since: string; until: string },
-  force = false,
+  value: DebriefPayload,
+): Promise<void> {
+  await mkdir(snapshotDirectory, { recursive: true });
+  const path = snapshotPath(range);
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const snapshot: DebriefSnapshot = {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    range,
+    value,
+  };
+  await writeFile(temporary, `${JSON.stringify(snapshot)}\n`, {
+    mode: 0o600,
+  });
+  await rename(temporary, path);
+}
+
+function withFreshness(
+  value: DebriefPayload,
+  source: "live" | "memory" | "disk",
+  refreshing: boolean,
+  expiresAt: number,
+): DebriefPayload {
+  return {
+    ...value,
+    freshness: {
+      source,
+      refreshing,
+      expiresAt: new Date(expiresAt).toISOString(),
+    },
+  };
+}
+
+async function refreshDebrief(
+  range: { since: string; until: string },
 ): Promise<DebriefPayload> {
-  const key = `${range.since}:${range.until}`;
-  const cached = cache.get(key);
-  if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
+  const key = debriefKey(range);
   const pending = inflight.get(key);
   if (pending) return pending;
   const promise = buildDebrief(range)
-    .then((value) => {
-      cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, value });
+    .then(async (value) => {
+      const expiresAt = Date.now() + CACHE_TTL_MS;
+      cache.set(key, { expiresAt, value });
+      await writeSnapshot(range, value);
       return value;
     })
     .finally(() => inflight.delete(key));
   inflight.set(key, promise);
   return promise;
+}
+
+export async function refreshDebriefPayload(range: {
+  since: string;
+  until: string;
+}): Promise<DebriefPayload> {
+  const value = await refreshDebrief(range);
+  return withFreshness(
+    value,
+    "live",
+    false,
+    cache.get(debriefKey(range))?.expiresAt ?? Date.now() + CACHE_TTL_MS,
+  );
+}
+
+export async function buildDebriefPayload(
+  range: { since: string; until: string },
+  force = false,
+): Promise<DebriefPayload> {
+  const key = debriefKey(range);
+  let source: "memory" | "disk" = "memory";
+  let cached = cache.get(key);
+  if (!cached) {
+    const snapshot = await readSnapshot(range);
+    if (snapshot) {
+      source = "disk";
+      cached = {
+        expiresAt: snapshot.savedAt + CACHE_TTL_MS,
+        value: snapshot.value,
+      };
+      cache.set(key, cached);
+    }
+  }
+
+  if (cached) {
+    const stale = cached.expiresAt <= Date.now();
+    const refreshing = force || stale || inflight.has(key);
+    if (force || stale) {
+      void refreshDebrief(range).catch((error: unknown) => {
+        process.stderr.write(
+          `Debrief background refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+    }
+    return withFreshness(
+      cached.value,
+      source,
+      refreshing,
+      cached.expiresAt,
+    );
+  }
+
+  const value = await refreshDebrief(range);
+  return withFreshness(
+    value,
+    "live",
+    false,
+    cache.get(key)?.expiresAt ?? Date.now() + CACHE_TTL_MS,
+  );
 }

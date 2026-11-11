@@ -13,6 +13,7 @@ const state = {
   competitors: null,
   debrief: null,
   debriefLoading: false,
+  debriefPollTimer: null,
   scanJob: null,
   analysisReport: "overview",
 };
@@ -2148,6 +2149,50 @@ function renderScaledValidation(rows) {
   </table>`;
 }
 
+function renderDebriefDecisionQueue() {
+  if (!state.debrief) return;
+  const selected = $("debriefActionFilter").value;
+  const all = state.debrief.decisions || [];
+  const counts = Object.fromEntries(
+    ["Scale", "Pause", "Iterate", "Wait"].map((action) => [
+      action,
+      all.filter((row) => row.recommendedAction === action).length,
+    ]),
+  );
+  $("debriefDecisionSummary").innerHTML = ["Scale", "Pause", "Iterate", "Wait"]
+    .map(
+      (action) =>
+        `<button data-debrief-action="${action}" class="debrief-action-card action-${action.toLowerCase()}"><span>${action}</span><strong>${integer(counts[action])}</strong></button>`,
+    )
+    .join("");
+  const rows =
+    selected === "all"
+      ? all
+      : all.filter((row) => row.recommendedAction === selected);
+  $("debriefDecisionQueue").innerHTML = rows.length
+    ? `<table class="analysis-data-table debrief-table decision-table">
+      <thead><tr><th>Action</th><th class="sticky-cell">Creative</th><th>Why</th><th>Testing spend</th><th>Spend remaining</th><th>Days remaining</th><th>Testing sign-ups</th><th>Testing CPSU</th><th>Mature horizon</th><th>Retained-user cost</th><th>Confidence</th></tr></thead>
+      <tbody>${rows
+        .map(
+          (row) => `<tr>
+            <td><span class="debrief-action-pill action-${row.recommendedAction.toLowerCase()}">${escapeHtml(row.recommendedAction)}</span></td>
+            ${debriefCreativeCell(row)}
+            <td class="debrief-reasons">${escapeHtml(row.actionReason)}</td>
+            <td>${money(row.testing.spend)}</td>
+            <td>${row.spendToDecision > 0 ? money(row.spendToDecision) : "Ready"}</td>
+            <td>${row.daysToDecision == null ? "—" : row.daysToDecision === 0 ? "Ready" : `${integer(row.daysToDecision)}d`}</td>
+            <td>${integer(row.testing.signups)}</td>
+            <td>${debriefMoney(row.testing.cpsu)}</td>
+            <td>${escapeHtml(row.retentionHorizon || "—")}</td>
+            <td>${debriefMoney(row.retentionCost)}</td>
+            <td>${debriefConfidenceChip(row.retentionConfidence)}</td>
+          </tr>`,
+        )
+        .join("")}</tbody>
+    </table>`
+    : '<div class="analysis-empty">No creatives match this action.</div>';
+}
+
 function renderDebriefSources(sources) {
   const headers = [
     "Source",
@@ -2348,8 +2393,11 @@ function renderDebrief() {
   const data = state.debrief;
   if (!data) return;
   const s = data.summary;
+  const freshness = data.freshness;
   $("debriefStatus").textContent =
-    `${debriefDay(s.since)} → ${debriefDay(s.until)} · Meta partner in ${data.adjustApp} · generated ${new Date(data.generatedAt).toLocaleString()}`;
+    `${debriefDay(s.since)} → ${debriefDay(s.until)} · Meta partner in ${data.adjustApp} · updated ${new Date(data.generatedAt).toLocaleString()}` +
+    (freshness?.refreshing ? " · refreshing in background…" : "") +
+    (freshness?.source === "disk" ? " · restored snapshot" : "");
   $("debriefHeadline").innerHTML =
     `<strong>${integer(s.tested)} creatives tested since ${debriefDay(s.since)}:</strong> ` +
     `${integer(s.winners)} winners, ${integer(s.losers)} losers, ${integer(s.promoted)} scaled, ${integer(s.learning)} still learning.`;
@@ -2359,6 +2407,7 @@ function renderDebrief() {
     <div class="analysis-kpi"><span>Testing cost per sign-up</span><strong>${debriefMoney(s.cpsu)}</strong><p>${integer(s.testingSignups)} testing sign-ups · ${integer(s.scaledSignups)} scaled sign-ups</p></div>
     <div class="analysis-kpi"><span>Live now</span><strong>${integer(s.live)}</strong><p>${integer(s.paused)} paused · ${integer(s.promoted)} scaled to main</p></div>`;
   $("debriefBenchmarks").innerHTML = renderDebriefBenchmarks(data.benchmarks);
+  renderDebriefDecisionQueue();
   $("debriefSegmentBenchmarks").innerHTML =
     renderDebriefSegmentBenchmarks(data.segmentBenchmarks);
   $("debriefSources").innerHTML = renderDebriefSources(data.bySource);
@@ -2404,6 +2453,31 @@ function renderDebrief() {
   $("debriefContent").classList.remove("hidden");
 }
 
+function scheduleDebriefPoll(previousGeneratedAt, attempt = 0) {
+  if (state.debriefPollTimer) clearTimeout(state.debriefPollTimer);
+  if (attempt >= 40 || state.page !== "debrief") return;
+  state.debriefPollTimer = setTimeout(async () => {
+    try {
+      const params = new URLSearchParams();
+      const since = $("debriefSince").value;
+      if (since) params.set("since", since);
+      const response = await fetch(`/api/debrief?${params}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Refresh unavailable");
+      state.debrief = data;
+      renderDebrief();
+      if (
+        data.generatedAt === previousGeneratedAt ||
+        data.freshness?.refreshing
+      ) {
+        scheduleDebriefPoll(previousGeneratedAt, attempt + 1);
+      }
+    } catch {
+      scheduleDebriefPoll(previousGeneratedAt, attempt + 1);
+    }
+  }, 3000);
+}
+
 async function loadDebrief(force = false) {
   if (state.debriefLoading) return;
   const since = $("debriefSince").value;
@@ -2426,6 +2500,9 @@ async function loadDebrief(force = false) {
     if (!response.ok) throw new Error(data.error || "Test debrief unavailable");
     state.debrief = data;
     renderDebrief();
+    if (data.freshness?.refreshing) {
+      scheduleDebriefPoll(data.generatedAt);
+    }
   } catch (error) {
     $("debriefStatus").textContent = error.message;
     $("debriefWarning").textContent = error.message;
@@ -2440,6 +2517,10 @@ async function loadDebrief(force = false) {
 
 function switchPage(page) {
   state.page = page;
+  if (page !== "debrief" && state.debriefPollTimer) {
+    clearTimeout(state.debriefPollTimer);
+    state.debriefPollTimer = null;
+  }
   $("libraryPage").classList.toggle("hidden", page !== "library");
   $("analysisPage").classList.toggle("hidden", page !== "analysis");
   $("inspirationPage").classList.toggle("hidden", page !== "inspiration");
@@ -2563,9 +2644,20 @@ $("applyDebrief").addEventListener("click", () => void loadDebrief());
 $("refreshDebrief").addEventListener("click", () => void loadDebrief(true));
 $("debriefSearch").addEventListener("input", renderDebriefAll);
 $("debriefPage").addEventListener("click", (event) => {
+  const action = event.target.closest("[data-debrief-action]")?.dataset
+    .debriefAction;
+  if (action) {
+    $("debriefActionFilter").value = action;
+    renderDebriefDecisionQueue();
+    return;
+  }
   const button = event.target.closest("[data-debrief-preview]");
   if (button) void openDebriefPreview(button);
 });
+$("debriefActionFilter").addEventListener(
+  "change",
+  renderDebriefDecisionQueue,
+);
 [
   "debriefSourceFilter",
   "debriefFormatFilter",

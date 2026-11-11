@@ -31,7 +31,11 @@ import {
 } from "./analysis.js";
 import { fetchAdManageAssets } from "./admanage-assets.js";
 import { fetchAdjacentCompetitorCreatives } from "./competitors.js";
-import { buildDebriefPayload, resolveDebriefRange } from "./debrief.js";
+import {
+  buildDebriefPayload,
+  refreshDebriefPayload,
+  resolveDebriefRange,
+} from "./debrief.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "..");
@@ -1204,6 +1208,27 @@ function scheduleNextAutoScan(): void {
   }, delay);
 }
 
+function scheduleDebriefRefresh(): void {
+  if (
+    !process.env.ADJUST_API_TOKEN?.trim() ||
+    !process.env.META_ACCESS_TOKEN?.trim() ||
+    !process.env.META_AD_ACCOUNT_ID?.trim()
+  ) {
+    return;
+  }
+  const refresh = () => {
+    void refreshDebriefPayload(resolveDebriefRange(null, null)).catch(
+      (error: unknown) => {
+        process.stderr.write(
+          `Scheduled debrief refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      },
+    );
+  };
+  refresh();
+  setInterval(refresh, 30 * 60_000);
+}
+
 const server = createServer((req, res) => {
   void handler(req, res).catch((error) => {
     json(res, 500, {
@@ -1216,6 +1241,7 @@ await mkdir(dataDirectory, { recursive: true });
 
 server.listen(port, host, () => {
   scheduleNextAutoScan();
+  scheduleDebriefRefresh();
   const displayHost = host === "0.0.0.0" ? "localhost" : host;
   process.stdout.write(
     `Creative Intelligence dashboard: http://${displayHost}:${port}\n` +

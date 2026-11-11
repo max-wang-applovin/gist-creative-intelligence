@@ -294,6 +294,23 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-headline { margin: 0 0 12px; font-size: 15px; color: #26313c; }
 .debrief-card { margin-bottom: 12px; }
 .debrief-rule { margin: -6px 0 10px; color: #6e7883; font-size: 10px; }
+.debrief-section-heading { display: flex; justify-content: space-between; align-items: end; gap: 14px; }
+.debrief-section-heading .analysis-card-title { margin-bottom: 12px; }
+.debrief-section-heading select { background: white; color: #222a32; border-color: #d9dee4; }
+.debrief-action-summary { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin: 10px 0 12px; }
+.debrief-action-card { display: flex; justify-content: space-between; align-items: center; border: 1px solid #dfe4ea; border-radius: 8px; padding: 10px 12px; background: #f6f8fa; color: #38434e; }
+.debrief-action-card span { font-size: 9px; font-weight: 800; text-transform: uppercase; }
+.debrief-action-card strong { font-size: 18px; }
+.debrief-action-card.action-scale { background: #e3f6ec; color: #18724f; }
+.debrief-action-card.action-pause { background: #fde8e8; color: #a92d2d; }
+.debrief-action-card.action-iterate { background: #e5edfb; color: #185ecb; }
+.debrief-action-card.action-wait { background: #fdf1de; color: #9a5d0c; }
+.debrief-action-pill { display: inline-block; border-radius: 999px; padding: 3px 8px; font-size: 9px; font-weight: 800; }
+.debrief-action-pill.action-scale { background: #e3f6ec; color: #18724f; }
+.debrief-action-pill.action-pause { background: #fde8e8; color: #a92d2d; }
+.debrief-action-pill.action-iterate { background: #e5edfb; color: #185ecb; }
+.debrief-action-pill.action-wait { background: #fdf1de; color: #9a5d0c; }
+.debrief-decision-queue { max-height: 620px; }
 .debrief-table-wrap { max-height: none; }
 .debrief-all { max-height: 720px; }
 .debrief-table { width: 100%; font-size: 11px; }
@@ -442,6 +459,7 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .detail-left { display: none; }
   .overview-grid, .performance-panels, .insights-grid { grid-template-columns: 1fr; }
   .analysis-summary, .analysis-columns, .concept-dimensions, .recipe-grid, .inspiration-grid, .library-links { grid-template-columns: 1fr 1fr; }
+  .debrief-action-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .freshness { display: none; }
 }
 @media (max-width: 560px) {
@@ -450,4 +468,5 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .summary-item { border-bottom: 1px solid var(--border-soft); }
   .topbar { min-height: 70px; }
   .analysis-summary, .analysis-columns, .concept-dimensions, .recipe-grid, .inspiration-grid, .library-links { grid-template-columns: 1fr; }
+  .debrief-action-summary { grid-template-columns: 1fr; }
 }

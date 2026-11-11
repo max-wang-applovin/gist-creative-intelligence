@@ -254,6 +254,23 @@
             <p id="debriefHeadline" class="debrief-headline"></p>
             <div id="debriefSummary" class="analysis-summary"></div>
             <section class="analysis-card debrief-card">
+              <div class="debrief-section-heading">
+                <div>
+                  <div class="analysis-card-title">Decision queue · recommended next action</div>
+                  <p class="debrief-rule">Testing-only recommendation based on spend readiness, mature retention confidence and retained-user cost.</p>
+                </div>
+                <label><span>Action</span><select id="debriefActionFilter">
+                  <option value="all">All actions</option>
+                  <option value="Scale">Scale</option>
+                  <option value="Pause">Pause</option>
+                  <option value="Iterate">Iterate</option>
+                  <option value="Wait">Wait</option>
+                </select></label>
+              </div>
+              <div id="debriefDecisionSummary" class="debrief-action-summary"></div>
+              <div id="debriefDecisionQueue" class="data-table-wrap debrief-table-wrap debrief-decision-queue"></div>
+            </section>
+            <section class="analysis-card debrief-card">
               <div class="analysis-card-title">Benchmarks · average vs best creative</div>
               <p class="debrief-rule">Average is cohort-weighted across mature, decided creatives uploaded in the selected window. Best is the #1 retention-adjusted winner.</p>
               <div id="debriefBenchmarks" class="data-table-wrap debrief-table-wrap"></div>
