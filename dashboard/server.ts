@@ -915,26 +915,36 @@ async function buildDebriefVisualLearnings(
   let scanned = 0;
   for (const creative of debrief.all) {
     const analysis = analyses.get(normalizeCreativeName(creative.name));
-    if (!analysis) continue;
-    scanned += 1;
-    if (creative.verdict === "Winner" && analysis.strengths[0]) {
-      strengths.push(analysis.strengths[0]);
-    }
-    if (creative.verdict === "Loser" && analysis.risks[0]) {
-      risks.push(analysis.risks[0]);
+    if (analysis) {
+      scanned += 1;
+      if (creative.verdict === "Winner" && analysis.strengths[0]) {
+        strengths.push(analysis.strengths[0]);
+      }
+      if (creative.verdict === "Loser" && analysis.risks[0]) {
+        risks.push(analysis.risks[0]);
+      }
     }
     if (creative.verdict !== "Winner" && creative.verdict !== "Loser") {
       continue;
     }
-    const dimensions = [
-      ["Theme", analysis.taxonomy.theme],
-      ["Angle", analysis.taxonomy.angle],
-      ["Format", analysis.taxonomy.format],
-      ["Hook", analysis.taxonomy.hookType],
-      ["Presenter", analysis.taxonomy.presenter],
-      ["Color harmony", analysis.colorTheory.harmony],
-      ["Palette", analysis.colorTheory.paletteTemperature],
+    const dimensions: Array<[string, string | null | undefined]> = [
+      ["Source", creative.source],
+      ["Format", creative.format],
+      ["OS", creative.os],
+      ["Category", creative.category],
+      ["Creator", creative.creator],
     ];
+    if (analysis) {
+      dimensions.push(
+        ["Theme", analysis.taxonomy.theme],
+        ["Angle", analysis.taxonomy.angle],
+        ["Visual format", analysis.taxonomy.format],
+        ["Hook", analysis.taxonomy.hookType],
+        ["Presenter", analysis.taxonomy.presenter],
+        ["Color harmony", analysis.colorTheory.harmony],
+        ["Palette", analysis.colorTheory.paletteTemperature],
+      );
+    }
     for (const [dimension, value] of dimensions) {
       if (!value) continue;
       const key = `${dimension}:${value}`;

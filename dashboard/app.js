@@ -2762,15 +2762,21 @@ function renderDebriefAll() {
 function renderDebriefLearnings() {
   if (!state.debrief) return;
   const visual = state.debrief.visualLearnings;
-  if (!visual?.coverage?.scanned) {
+  const hasLearnings =
+    visual?.winningPatterns?.length ||
+    visual?.losingPatterns?.length ||
+    visual?.strengths?.length ||
+    visual?.risks?.length;
+  if (!visual || !hasLearnings) {
     $("debriefVisualCoverage").textContent =
       "No debrief creatives have visual-QA scans yet. Use Ad Analysis → Scan creatives to generate broader learnings.";
     $("debriefLearnings").innerHTML =
       '<div class="analysis-empty">Visual learnings will appear after creatives are scanned.</div>';
     return;
   }
-  $("debriefVisualCoverage").textContent =
-    `${integer(visual.coverage.scanned)} of ${integer(visual.coverage.total)} tested creatives have visual-QA coverage. Patterns compare scanned winners and losers.`;
+  $("debriefVisualCoverage").textContent = visual.coverage.scanned
+    ? `${integer(visual.coverage.scanned)} of ${integer(visual.coverage.total)} tested creatives have visual-QA coverage. Patterns combine visual scans and performance metadata.`
+    : "Visual-QA scans are not persisted on this service yet, so these patterns use creative source, format, OS, category and creator metadata. Scan creatives to add hooks, themes and color learnings.";
   const patternPanel = (title, patterns, tone) => `
     <section class="debrief-learning-panel ${tone}">
       <h3>${title}</h3>
