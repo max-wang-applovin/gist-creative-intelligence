@@ -19,6 +19,8 @@ const state = {
   debriefHoverButton: null,
   debriefPreviewCache: new Map(),
   expandedDecisionGroups: new Set(),
+  debriefSection: "decisions",
+  debriefPageNumber: 1,
   scanJob: null,
   analysisReport: "overview",
 };
@@ -2639,62 +2641,239 @@ function filteredDebriefRows() {
 function renderDebriefAll() {
   if (!state.debrief) return;
   const rows = filteredDebriefRows();
-  $("debriefCount").textContent = `${rows.length} of ${state.debrief.all.length} tested`;
+  const pageSize = 25;
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  state.debriefPageNumber = Math.min(
+    Math.max(1, state.debriefPageNumber),
+    totalPages,
+  );
+  const start = (state.debriefPageNumber - 1) * pageSize;
+  const pageRows = rows.slice(start, start + pageSize);
+  $("debriefCount").textContent = rows.length
+    ? `${start + 1}–${Math.min(start + pageSize, rows.length)} of ${rows.length} filtered`
+    : `0 of ${state.debrief.all.length} tested`;
+  $("debriefPageStatus").textContent =
+    `Page ${state.debriefPageNumber} of ${totalPages}`;
+  $("debriefPreviousPage").disabled = state.debriefPageNumber <= 1;
+  $("debriefNextPage").disabled =
+    state.debriefPageNumber >= totalPages || rows.length === 0;
   if (!rows.length) {
     $("debriefAll").innerHTML =
       '<div class="analysis-empty">No tested creatives match these filters.</div>';
     return;
   }
-  const headers = [
-    "Creative",
-    "Uploaded",
-    "Source",
-    "Format",
-    "OS",
-    "Stage",
-    "Verdict",
-    "Total spend",
-    "Testing spend",
-    "Scaled spend",
-    "Testing sign-ups",
-    "Testing cost / sign-up",
-    "Testing CPI",
-    "Testing CTR",
-    "Testing D1",
-    "Cost / D1 retained",
-    "Testing D3",
-    "Cost / D3 retained",
-    "Testing D7",
-    "Cost / D7 retained",
-    "Confidence",
+  const columns = [
+    {
+      label: "Creative",
+      presets: ["always"],
+      headerClass: "sticky-cell",
+      cell: debriefCreativeCell,
+    },
+    {
+      label: "Action",
+      presets: ["decision"],
+      cell: (row) =>
+        `<td><span class="debrief-action-pill action-${row.recommendedAction.toLowerCase()}">${escapeHtml(row.recommendedAction)}</span></td>`,
+    },
+    {
+      label: "Why",
+      presets: ["decision"],
+      cell: (row) =>
+        `<td class="debrief-reasons">${escapeHtml(row.actionReason)}</td>`,
+    },
+    {
+      label: "Verdict",
+      presets: ["decision"],
+      cell: (row) => `<td>${debriefVerdictChip(row)}</td>`,
+    },
+    {
+      label: "Uploaded",
+      presets: ["delivery"],
+      cell: (row) =>
+        `<td title="${escapeHtml(row.uploadedAt || "")}">${debriefShortDay(row.uploadedDate)}</td>`,
+    },
+    {
+      label: "Source",
+      presets: ["delivery"],
+      cell: (row) => `<td>${escapeHtml(row.source)}</td>`,
+    },
+    {
+      label: "Format",
+      presets: ["delivery"],
+      cell: (row) => `<td>${escapeHtml(row.format)}</td>`,
+    },
+    {
+      label: "OS",
+      presets: ["delivery"],
+      cell: (row) => `<td>${escapeHtml(row.os)}</td>`,
+    },
+    {
+      label: "Stage",
+      presets: ["delivery"],
+      cell: (row) =>
+        `<td>${row.promoted ? "Testing + scaled" : "Testing only"}</td>`,
+    },
+    {
+      label: "Total spend",
+      presets: ["delivery"],
+      cell: (row) => `<td>${money(row.spend)}</td>`,
+    },
+    {
+      label: "Testing spend",
+      presets: ["decision", "acquisition", "retention", "delivery"],
+      cell: (row) => `<td>${money(row.testing.spend)}</td>`,
+    },
+    {
+      label: "Scaled spend",
+      presets: ["delivery"],
+      cell: (row) =>
+        `<td>${row.scaled.spend > 0 ? money(row.scaled.spend) : "—"}</td>`,
+    },
+    {
+      label: "Spend remaining",
+      presets: ["decision"],
+      cell: (row) =>
+        `<td>${row.spendToDecision > 0 ? money(row.spendToDecision) : "Ready"}</td>`,
+    },
+    {
+      label: "Mature horizon",
+      presets: ["decision"],
+      cell: (row) => `<td>${escapeHtml(row.retentionHorizon || "—")}</td>`,
+    },
+    {
+      label: "Retained-user cost",
+      presets: ["decision"],
+      cell: (row) => `<td>${debriefMoney(row.retentionCost)}</td>`,
+    },
+    {
+      label: "Testing sign-ups",
+      presets: ["acquisition"],
+      cell: (row) => `<td>${integer(row.testing.signups)}</td>`,
+    },
+    {
+      label: "Testing cost / sign-up",
+      presets: ["decision", "acquisition"],
+      cell: (row) => `<td><strong>${debriefMoney(row.testing.cpsu)}</strong></td>`,
+    },
+    {
+      label: "Testing CPI",
+      presets: ["acquisition"],
+      cell: (row) => `<td>${debriefMoney(row.testing.cpi)}</td>`,
+    },
+    {
+      label: "Testing CTR",
+      presets: ["acquisition"],
+      cell: (row) => `<td>${pct(row.testing.ctr)}</td>`,
+    },
+    {
+      label: "Testing D1",
+      presets: ["retention"],
+      cell: (row) => `<td>${debriefStageRetention(row, 1)}</td>`,
+    },
+    {
+      label: "Cost / D1 retained",
+      presets: ["retention"],
+      cell: (row) => `<td>${debriefRetentionCost(row, 1)}</td>`,
+    },
+    {
+      label: "Testing D3",
+      presets: ["retention"],
+      cell: (row) => `<td>${debriefStageRetention(row, 3)}</td>`,
+    },
+    {
+      label: "Cost / D3 retained",
+      presets: ["retention"],
+      cell: (row) => `<td>${debriefRetentionCost(row, 3)}</td>`,
+    },
+    {
+      label: "Testing D7",
+      presets: ["retention"],
+      cell: (row) => `<td>${debriefStageRetention(row, 7)}</td>`,
+    },
+    {
+      label: "Cost / D7 retained",
+      presets: ["retention"],
+      cell: (row) => `<td>${debriefRetentionCost(row, 7)}</td>`,
+    },
+    {
+      label: "Confidence",
+      presets: ["decision", "retention"],
+      cell: (row) => `<td>${debriefConfidenceChip(row.retentionConfidence)}</td>`,
+    },
   ];
-  $("debriefAll").innerHTML = `<table class="analysis-data-table debrief-table"><thead><tr>${headers
-    .map((header, index) => `<th class="${index === 0 ? "sticky-cell" : ""}">${header}</th>`)
-    .join("")}</tr></thead><tbody>${rows
+  const preset = $("debriefColumnPreset").value;
+  const visibleColumns = columns.filter(
+    (column) =>
+      preset === "all" ||
+      column.presets.includes("always") ||
+      column.presets.includes(preset),
+  );
+  $("debriefAll").innerHTML = `<table class="analysis-data-table debrief-table"><thead><tr>${visibleColumns
     .map(
-      (row) => `<tr>
-        ${debriefCreativeCell(row)}
-        <td title="${escapeHtml(row.uploadedAt || "")}">${debriefShortDay(row.uploadedDate)}</td>
-        <td>${escapeHtml(row.source)}</td>
-        <td>${escapeHtml(row.format)}</td>
-        <td>${escapeHtml(row.os)}</td>
-        <td>${row.promoted ? "Testing + scaled" : "Testing only"}</td>
-        <td>${debriefVerdictChip(row)}</td>
-        ${debriefSpendCells(row)}
-        <td>${integer(row.testing.signups)}</td>
-        <td><strong>${debriefMoney(row.testing.cpsu)}</strong></td>
-        <td>${debriefMoney(row.testing.cpi)}</td>
-        <td>${pct(row.testing.ctr)}</td>
-        <td>${debriefStageRetention(row, 1)}</td>
-        <td>${debriefRetentionCost(row, 1)}</td>
-        <td>${debriefStageRetention(row, 3)}</td>
-        <td>${debriefRetentionCost(row, 3)}</td>
-        <td>${debriefStageRetention(row, 7)}</td>
-        <td>${debriefRetentionCost(row, 7)}</td>
-        <td>${debriefConfidenceChip(row.retentionConfidence)}</td>
-      </tr>`,
+      (column) =>
+        `<th class="${column.headerClass || ""}">${column.label}</th>`,
     )
+    .join("")}</tr></thead><tbody>${pageRows
+    .map((row) => `<tr>${visibleColumns.map((column) => column.cell(row)).join("")}</tr>`)
     .join("")}</tbody></table>`;
+}
+
+function renderDebriefLearnings() {
+  if (!state.debrief) return;
+  const view = $("debriefLearningFilter").value;
+  const views = {
+    winners: {
+      title: "Top 10 winners · lowest retention-adjusted cost",
+      rule: state.debrief.rules.winners,
+      rows: state.debrief.winners,
+      empty: "No creative has cleared the winner criteria yet.",
+      reasons: undefined,
+    },
+    losers: {
+      title: "Top 10 losers · highest retention-adjusted cost",
+      rule: state.debrief.rules.losers,
+      rows: state.debrief.losers,
+      empty: "No statistically eligible losers yet.",
+      reasons: undefined,
+    },
+    retentionRisks: {
+      title: "Good sign-ups · weak retention",
+      rule: state.debrief.rules.retentionRisks,
+      rows: state.debrief.retentionRisks,
+      empty:
+        "No creatives currently combine efficient sign-ups with below-typical mature retention.",
+      reasons: debriefRetentionRiskReasons,
+    },
+  };
+  const selected = views[view] || views.winners;
+  $("debriefLearningsTitle").textContent = selected.title;
+  $("debriefLearningsRule").textContent = selected.rule;
+  $("debriefLearnings").innerHTML = debriefRankedTable(
+    selected.rows,
+    selected.empty,
+    selected.reasons,
+  );
+}
+
+function setDebriefSection(section) {
+  state.debriefSection = section;
+  document.querySelectorAll("[data-debrief-section]").forEach((button) => {
+    button.classList.toggle(
+      "active",
+      button.dataset.debriefSection === section,
+    );
+  });
+  document
+    .querySelectorAll("[data-debrief-section-panel]")
+    .forEach((panel) => {
+      panel.classList.toggle(
+        "hidden",
+        panel.dataset.debriefSectionPanel !== section,
+      );
+    });
+  if (section === "decisions") renderDebriefDecisionQueue();
+  else if (section === "learnings") renderDebriefLearnings();
+  else if (section === "all") renderDebriefAll();
 }
 
 function renderDebrief() {
@@ -2710,31 +2889,20 @@ function renderDebrief() {
     `<strong>${integer(s.tested)} creatives tested since ${debriefDay(s.since)}:</strong> ` +
     `${integer(s.winners)} winners, ${integer(s.losers)} losers, ${integer(s.promoted)} scaled, ${integer(s.learning)} still learning.`;
   $("debriefSummary").innerHTML = `
-    <div class="analysis-kpi primary"><span>Creatives tested</span><strong>${integer(s.tested)}</strong><p>${integer(s.middle)} decided in the middle · ${integer(s.carryover)} uploaded before ${debriefShortDay(s.since)}</p></div>
-    <div class="analysis-kpi"><span>Testing spend</span><strong>${money(s.testingSpend, true)}</strong><p>${money(s.scaledSpend, true)} scaled · ${money(s.spend, true)} total</p></div>
-    <div class="analysis-kpi"><span>Testing cost per sign-up</span><strong>${debriefMoney(s.cpsu)}</strong><p>${integer(s.testingSignups)} testing sign-ups · ${integer(s.scaledSignups)} scaled sign-ups</p></div>
-    <div class="analysis-kpi"><span>Live now</span><strong>${integer(s.live)}</strong><p>${integer(s.paused)} paused · ${integer(s.promoted)} scaled to main</p></div>`;
+    <div><span>Tested</span><strong>${integer(s.tested)}</strong></div>
+    <div><span>Scale</span><strong>${integer((data.decisions || []).filter((row) => row.recommendedAction === "Scale").length)}</strong></div>
+    <div><span>Pause</span><strong>${integer((data.decisions || []).filter((row) => row.recommendedAction === "Pause").length)}</strong></div>
+    <div><span>Iterate</span><strong>${integer((data.decisions || []).filter((row) => row.recommendedAction === "Iterate").length)}</strong></div>
+    <div><span>Wait</span><strong>${integer((data.decisions || []).filter((row) => row.recommendedAction === "Wait").length)}</strong></div>
+    <div><span>Testing spend</span><strong>${money(s.testingSpend, true)}</strong></div>
+    <div><span>Testing CPSU</span><strong>${debriefMoney(s.cpsu)}</strong></div>
+    <div><span>D7 benchmark</span><strong>${debriefPct(data.benchmarks?.average?.d7)}</strong></div>`;
   $("debriefBenchmarks").innerHTML = renderDebriefBenchmarks(data.benchmarks);
   renderDebriefDecisionQueue();
   $("debriefSegmentBenchmarks").innerHTML =
     renderDebriefSegmentBenchmarks(data.segmentBenchmarks);
   $("debriefSources").innerHTML = renderDebriefSources(data.bySource);
-  $("debriefWinnersRule").textContent = data.rules.winners;
-  $("debriefLosersRule").textContent = data.rules.losers;
-  $("debriefWinners").innerHTML = debriefRankedTable(
-    data.winners,
-    "No creative has cleared the decision rule with 10+ sign-ups yet.",
-  );
-  $("debriefLosers").innerHTML = debriefRankedTable(
-    data.losers,
-    "No decided losers yet.",
-  );
-  $("debriefRetentionRisksRule").textContent = data.rules.retentionRisks;
-  $("debriefRetentionRisks").innerHTML = debriefRankedTable(
-    data.retentionRisks,
-    "No creatives currently combine efficient sign-ups with below-typical mature retention.",
-    debriefRetentionRiskReasons,
-  );
+  renderDebriefLearnings();
   $("debriefScaledValidation").innerHTML =
     renderScaledValidation(data.scaledValidation);
   $("debriefRules").innerHTML = Object.values(data.rules)
@@ -2755,6 +2923,7 @@ function renderDebrief() {
     sourceSelect.value = selected;
   }
   renderDebriefAll();
+  setDebriefSection(state.debriefSection);
 
   $("debriefWarning").textContent = data.warnings.join(" ");
   $("debriefWarning").classList.toggle("hidden", !data.warnings.length);
@@ -2952,7 +3121,6 @@ $("refreshCompetitors").addEventListener("click", () =>
 );
 $("applyDebrief").addEventListener("click", () => void loadDebrief());
 $("refreshDebrief").addEventListener("click", () => void loadDebrief(true));
-$("debriefSearch").addEventListener("input", renderDebriefAll);
 $("debriefPage").addEventListener("click", (event) => {
   const action = event.target.closest("[data-debrief-action]")?.dataset
     .debriefAction;
@@ -2991,6 +3159,15 @@ $("debriefActionFilter").addEventListener(
   "change",
   renderDebriefDecisionQueue,
 );
+$("debriefLearningFilter").addEventListener(
+  "change",
+  renderDebriefLearnings,
+);
+document.querySelectorAll("[data-debrief-section]").forEach((button) => {
+  button.addEventListener("click", () =>
+    setDebriefSection(button.dataset.debriefSection),
+  );
+});
 [
   "debriefSourceFilter",
   "debriefFormatFilter",
@@ -2999,7 +3176,25 @@ $("debriefActionFilter").addEventListener(
   "debriefVerdictFilter",
   "debriefUploadFilter",
   "debriefSort",
-].forEach((id) => $(id).addEventListener("change", renderDebriefAll));
+  "debriefColumnPreset",
+].forEach((id) =>
+  $(id).addEventListener("change", () => {
+    state.debriefPageNumber = 1;
+    renderDebriefAll();
+  }),
+);
+$("debriefSearch").addEventListener("input", () => {
+  state.debriefPageNumber = 1;
+  renderDebriefAll();
+});
+$("debriefPreviousPage").addEventListener("click", () => {
+  state.debriefPageNumber -= 1;
+  renderDebriefAll();
+});
+$("debriefNextPage").addEventListener("click", () => {
+  state.debriefPageNumber += 1;
+  renderDebriefAll();
+});
 
 const initialPage = new URLSearchParams(window.location.search).get("page");
 const initialReport = new URLSearchParams(window.location.search).get("report");

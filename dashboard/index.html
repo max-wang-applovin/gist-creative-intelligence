@@ -251,9 +251,18 @@
             Pulling Adjust testing results and the Meta ad inventory… this can take up to a minute.
           </div>
           <div id="debriefContent" class="hidden">
-            <p id="debriefHeadline" class="debrief-headline"></p>
-            <div id="debriefSummary" class="analysis-summary"></div>
-            <section class="analysis-card debrief-card">
+            <div class="debrief-sticky-summary">
+              <p id="debriefHeadline" class="debrief-headline"></p>
+              <div id="debriefSummary" class="debrief-summary-bar"></div>
+              <nav class="debrief-section-nav" aria-label="Test debrief sections">
+                <button class="active" data-debrief-section="decisions">Decisions</button>
+                <button data-debrief-section="learnings">Learnings</button>
+                <button data-debrief-section="scaled">Scaled validation</button>
+                <button data-debrief-section="benchmarks">Benchmarks</button>
+                <button data-debrief-section="all">All creatives</button>
+              </nav>
+            </div>
+            <section id="debriefSectionDecisions" class="analysis-card debrief-card" data-debrief-section-panel="decisions">
               <div class="debrief-section-heading">
                 <div>
                   <div class="analysis-card-title">Decision queue · recommended next action</div>
@@ -270,41 +279,36 @@
               <div id="debriefDecisionSummary" class="debrief-action-summary"></div>
               <div id="debriefDecisionQueue" class="data-table-wrap debrief-table-wrap debrief-decision-queue"></div>
             </section>
-            <section class="analysis-card debrief-card">
-              <div class="analysis-card-title">Benchmarks · average vs best creative</div>
-              <p class="debrief-rule">Average is cohort-weighted across mature, decided creatives uploaded in the selected window. Best is the #1 retention-adjusted winner.</p>
-              <div id="debriefBenchmarks" class="data-table-wrap debrief-table-wrap"></div>
+            <section id="debriefSectionLearnings" class="analysis-card debrief-card hidden" data-debrief-section-panel="learnings">
+              <div class="debrief-section-heading">
+                <div>
+                  <div id="debriefLearningsTitle" class="analysis-card-title">Top 10 winners</div>
+                  <p id="debriefLearningsRule" class="debrief-rule"></p>
+                </div>
+                <label><span>Outcome</span><select id="debriefLearningFilter">
+                  <option value="winners">Winners</option>
+                  <option value="losers">Losers</option>
+                  <option value="retentionRisks">Good sign-ups · weak retention</option>
+                </select></label>
+              </div>
+              <div id="debriefLearnings" class="data-table-wrap debrief-table-wrap"></div>
             </section>
-            <section class="analysis-card debrief-card">
-              <div class="analysis-card-title">Benchmarks by source · OS · format</div>
-              <p class="debrief-rule">Testing-only, cohort-weighted benchmarks for fairer comparisons between like creatives.</p>
-              <div id="debriefSegmentBenchmarks" class="data-table-wrap debrief-table-wrap"></div>
-            </section>
-            <section class="analysis-card debrief-card">
-              <div class="analysis-card-title">By source</div>
-              <div id="debriefSources" class="data-table-wrap debrief-table-wrap"></div>
-            </section>
-            <section class="analysis-card debrief-card">
-              <div class="analysis-card-title">Top 10 winners · lowest retention-adjusted cost</div>
-              <p id="debriefWinnersRule" class="debrief-rule"></p>
-              <div id="debriefWinners" class="data-table-wrap debrief-table-wrap"></div>
-            </section>
-            <section class="analysis-card debrief-card">
-              <div class="analysis-card-title">Top 10 losers · highest retention-adjusted cost</div>
-              <p id="debriefLosersRule" class="debrief-rule"></p>
-              <div id="debriefLosers" class="data-table-wrap debrief-table-wrap"></div>
-            </section>
-            <section class="analysis-card debrief-card">
-              <div class="analysis-card-title">Good sign-ups · weak retention</div>
-              <p id="debriefRetentionRisksRule" class="debrief-rule"></p>
-              <div id="debriefRetentionRisks" class="data-table-wrap debrief-table-wrap"></div>
-            </section>
-            <section class="analysis-card debrief-card">
+            <section id="debriefSectionScaled" class="analysis-card debrief-card hidden" data-debrief-section-panel="scaled">
               <div class="analysis-card-title">Scaled validation · testing vs scaled</div>
               <p class="debrief-rule">Post-promotion performance is shown separately and never changes the original testing verdict.</p>
               <div id="debriefScaledValidation" class="data-table-wrap debrief-table-wrap"></div>
             </section>
-            <section class="analysis-card debrief-card">
+            <section id="debriefSectionBenchmarks" class="analysis-card debrief-card hidden" data-debrief-section-panel="benchmarks">
+              <div class="analysis-card-title">Benchmarks · average vs best creative</div>
+              <p class="debrief-rule">Average is cohort-weighted across mature, decided creatives uploaded in the selected window. Best is the #1 retention-adjusted winner.</p>
+              <div id="debriefBenchmarks" class="data-table-wrap debrief-table-wrap"></div>
+              <div class="analysis-card-title debrief-subsection-title">Benchmarks by source · OS · format</div>
+              <p class="debrief-rule">Testing-only, cohort-weighted benchmarks for fairer comparisons between like creatives.</p>
+              <div id="debriefSegmentBenchmarks" class="data-table-wrap debrief-table-wrap"></div>
+              <div class="analysis-card-title debrief-subsection-title">By source</div>
+              <div id="debriefSources" class="data-table-wrap debrief-table-wrap"></div>
+            </section>
+            <section id="debriefSectionAll" class="analysis-card debrief-card hidden" data-debrief-section-panel="all">
               <div class="analysis-card-title">Everything we tested · newest upload first</div>
               <div class="debrief-filters">
                 <label class="search-box">
@@ -357,14 +361,26 @@
                   <option value="costD7">Lowest cost / D7 retained</option>
                   <option value="retentionCost">Best retention-adjusted cost</option>
                 </select></label>
+                <label><span>Columns</span><select id="debriefColumnPreset">
+                  <option value="decision">Decision</option>
+                  <option value="acquisition">Acquisition</option>
+                  <option value="retention">Retention</option>
+                  <option value="delivery">Delivery</option>
+                  <option value="all">All columns</option>
+                </select></label>
                 <div id="debriefCount" class="result-count">— results</div>
               </div>
               <div id="debriefAll" class="data-table-wrap debrief-table-wrap debrief-all"></div>
+              <div class="debrief-pagination">
+                <button id="debriefPreviousPage" class="analysis-secondary">Previous</button>
+                <span id="debriefPageStatus">Page 1</span>
+                <button id="debriefNextPage" class="analysis-secondary">Next</button>
+              </div>
+              <details class="debrief-rules">
+                <summary>How winners and losers are decided</summary>
+                <ul id="debriefRules"></ul>
+              </details>
             </section>
-            <details class="analysis-card debrief-card debrief-rules">
-              <summary>How winners and losers are decided</summary>
-              <ul id="debriefRules"></ul>
-            </details>
           </div>
         </section>
       </main>
