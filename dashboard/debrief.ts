@@ -14,6 +14,7 @@ import { normalizeCreativeName } from "../bot/lib/names.js";
 export const DEFAULT_DEBRIEF_SINCE = "2026-09-15";
 const MAX_DEBRIEF_DAYS = 180;
 const CACHE_TTL_MS = 30 * 60_000;
+const META_INVENTORY_TTL_MS = 6 * 60 * 60_000;
 const snapshotDirectory = resolve(
   process.env.DASHBOARD_DATA_DIR?.trim() || ".agent-serve",
   "debrief",
@@ -281,7 +282,7 @@ const META_AD_STATUSES = [
   "WITH_ISSUES",
 ];
 
-async function fetchMetaAdInventory(): Promise<MetaAd[]> {
+async function fetchMetaAdInventoryLive(): Promise<MetaAd[]> {
   const token = process.env.META_ACCESS_TOKEN?.trim();
   const account = process.env.META_AD_ACCOUNT_ID?.trim();
   if (!token || !account) {
@@ -330,6 +331,102 @@ async function fetchMetaAdInventory(): Promise<MetaAd[]> {
     next = payload.paging?.next;
   }
   return ads;
+}
+
+type MetaInventorySnapshot = {
+  version: 1;
+  savedAt: string;
+  ads: MetaAd[];
+};
+
+let metaInventoryCache:
+  | { expiresAt: number; savedAt: string; ads: MetaAd[] }
+  | undefined;
+
+async function readMetaInventorySnapshot(): Promise<{
+  savedAt: string;
+  ads: MetaAd[];
+} | null> {
+  try {
+    const parsed = JSON.parse(
+      await readFile(join(snapshotDirectory, "meta-ad-inventory.json"), "utf8"),
+    ) as MetaInventorySnapshot;
+    if (
+      parsed.version !== 1 ||
+      !Array.isArray(parsed.ads) ||
+      !Number.isFinite(Date.parse(parsed.savedAt))
+    ) {
+      return null;
+    }
+    return { savedAt: parsed.savedAt, ads: parsed.ads };
+  } catch {
+    return null;
+  }
+}
+
+async function writeMetaInventorySnapshot(
+  ads: MetaAd[],
+): Promise<string> {
+  await mkdir(snapshotDirectory, { recursive: true });
+  const path = join(snapshotDirectory, "meta-ad-inventory.json");
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const savedAt = new Date().toISOString();
+  const snapshot: MetaInventorySnapshot = {
+    version: 1,
+    savedAt,
+    ads,
+  };
+  await writeFile(temporary, `${JSON.stringify(snapshot)}\n`, {
+    mode: 0o600,
+  });
+  await rename(temporary, path);
+  return savedAt;
+}
+
+async function fetchMetaAdInventory(): Promise<{
+  ads: MetaAd[];
+  warning: string | null;
+}> {
+  if (metaInventoryCache?.expiresAt && metaInventoryCache.expiresAt > Date.now()) {
+    return { ads: metaInventoryCache.ads, warning: null };
+  }
+  try {
+    const ads = await fetchMetaAdInventoryLive();
+    const savedAt = await writeMetaInventorySnapshot(ads);
+    metaInventoryCache = {
+      ads,
+      savedAt,
+      expiresAt: Date.now() + META_INVENTORY_TTL_MS,
+    };
+    return { ads, warning: null };
+  } catch (error) {
+    const stored =
+      metaInventoryCache ??
+      (await readMetaInventorySnapshot().then((snapshot) =>
+        snapshot
+          ? {
+              ...snapshot,
+              expiresAt:
+                Date.parse(snapshot.savedAt) + META_INVENTORY_TTL_MS,
+            }
+          : undefined,
+      ));
+    if (stored?.ads.length) {
+      metaInventoryCache = stored;
+      return {
+        ads: stored.ads,
+        warning:
+          `Meta ad inventory refresh failed; using the last successful inventory from ${stored.savedAt}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    return {
+      ads: [],
+      warning:
+        `Meta ad inventory unavailable; upload dates come from ad names and status/format are unknown: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 function num(value: unknown): number {
@@ -807,7 +904,7 @@ async function buildDebrief(range: {
 }): Promise<DebriefPayload> {
   const warnings: string[] = [];
   const { apiToken, app } = await resolveAdjustApp();
-  const [deliveryRows, retentionRows, metaAds] = await Promise.all([
+  const [deliveryRows, retentionRows, metaInventory] = await Promise.all([
     fetchAdjustReportRows(
       apiToken,
       app.token,
@@ -835,13 +932,10 @@ async function buildDebrief(range: {
       ],
       "Adjust retention cohorts",
     ),
-    fetchMetaAdInventory().catch((error: unknown) => {
-      warnings.push(
-        `Meta ad inventory unavailable; upload dates come from ad names and status/format are unknown: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return [] as MetaAd[];
-    }),
+    fetchMetaAdInventory(),
   ]);
+  const metaAds = metaInventory.ads;
+  if (metaInventory.warning) warnings.push(metaInventory.warning);
 
   const usableName = (row: AdjustReportRow): string | null => {
     const raw = row.creative_network?.trim();
