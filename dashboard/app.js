@@ -1946,8 +1946,17 @@ const debriefShortDay = (value) =>
     : "—";
 const debriefMoney = (value) => (value == null ? "—" : money(value));
 const debriefPct = (value) => (value == null ? "—" : pct(value));
-const debriefRetentionCost = (row, day) =>
-  debriefMoney(row[`costPerRetainedD${day}`]);
+const debriefRetentionCost = (row, day, stage = "testing") =>
+  debriefMoney(row[stage]?.[`costPerRetainedD${day}`]);
+const debriefStageRetention = (row, day, stage = "testing") => {
+  const metrics = row[stage];
+  if (!metrics || metrics[`d${day}`] == null) return "—";
+  return `${debriefPct(metrics[`d${day}`])}<small>${integer(metrics[`retainedD${day}`])}/${integer(metrics[`d${day}Cohort`])}</small>`;
+};
+const debriefConfidenceChip = (confidence) =>
+  confidence
+    ? `<span class="debrief-chip confidence-${confidence.toLowerCase()}">${escapeHtml(confidence)} confidence</span>`
+    : '<span class="debrief-chip confidence-none">No mature cohort</span>';
 
 function debriefChips(row) {
   const chips = [
@@ -2012,14 +2021,15 @@ function debriefRankedTable(
     "Total spend",
     "Testing spend",
     "Scaled spend",
-    "Sign-ups",
-    "Cost / sign-up",
-    "D1",
+    "Testing sign-ups",
+    "Testing cost / sign-up",
+    "Testing D1",
     "Cost / D1 retained",
-    "D3",
+    "Testing D3",
     "Cost / D3 retained",
-    "D7",
+    "Testing D7",
     "Cost / D7 retained",
+    "Confidence",
     "Why",
   ];
   return `<table class="analysis-data-table debrief-table"><thead><tr><th class="debrief-rank">#</th>${headers
@@ -2035,14 +2045,15 @@ function debriefRankedTable(
         <td>${row.promoted ? "Testing + scaled" : "Testing only"}</td>
         <td title="${escapeHtml(row.uploadedAt || "")}">${debriefShortDay(row.uploadedDate)}</td>
         ${debriefSpendCells(row)}
-        <td>${integer(row.signups)}</td>
-        <td><strong>${debriefMoney(row.cpsu)}</strong></td>
-        <td>${debriefPct(row.d1)}</td>
+        <td>${integer(row.testing.signups)}</td>
+        <td><strong>${debriefMoney(row.testing.cpsu)}</strong></td>
+        <td>${debriefStageRetention(row, 1)}</td>
         <td>${debriefRetentionCost(row, 1)}</td>
-        <td>${debriefPct(row.d3)}</td>
+        <td>${debriefStageRetention(row, 3)}</td>
         <td>${debriefRetentionCost(row, 3)}</td>
-        <td>${debriefPct(row.d7)}</td>
+        <td>${debriefStageRetention(row, 7)}</td>
         <td>${debriefRetentionCost(row, 7)}</td>
+        <td>${debriefConfidenceChip(row.retentionConfidence)}</td>
         <td class="debrief-reasons">${reasonsForRow(row).map((reason) => `<div>${escapeHtml(reason)}</div>`).join("")}</td>
       </tr>`,
     )
@@ -2063,10 +2074,10 @@ function debriefSourceRef(item) {
 function debriefRetentionRiskReasons(row) {
   const horizon = row.retentionHorizon;
   const key = horizon?.toLowerCase();
-  const rate = key ? row[key] : null;
+  const rate = key ? row.testing[key] : null;
   const baseline = key ? state.debrief?.typical?.[key] : null;
   return [
-    `Efficient sign-ups: ${debriefMoney(row.cpsu)} vs ${debriefMoney(state.debrief?.typical?.cpsu)} typical`,
+    `Efficient testing sign-ups: ${debriefMoney(row.testing.cpsu)} vs ${debriefMoney(state.debrief?.typical?.cpsu)} typical`,
     `${horizon || "Retention"}: ${debriefPct(rate)} vs ${debriefPct(baseline)} typical`,
   ];
 }
@@ -2074,7 +2085,7 @@ function debriefRetentionRiskReasons(row) {
 function renderDebriefBenchmarks(benchmarks) {
   const rows = [benchmarks.average, benchmarks.best].filter(Boolean);
   return `<table class="analysis-data-table debrief-table benchmark-table">
-    <thead><tr><th class="sticky-cell">Benchmark</th><th>Creative</th><th>Creatives</th><th>Cost / sign-up</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
+    <thead><tr><th class="sticky-cell">Benchmark</th><th>Creative</th><th>Creatives</th><th>Testing cost / sign-up</th><th>Testing D1</th><th>Testing D3</th><th>Testing D7</th></tr></thead>
     <tbody>${rows
       .map(
         (row) => `<tr>
@@ -2085,6 +2096,52 @@ function renderDebriefBenchmarks(benchmarks) {
           <td>${debriefPct(row.d1)}</td>
           <td>${debriefPct(row.d3)}</td>
           <td>${debriefPct(row.d7)}</td>
+        </tr>`,
+      )
+      .join("")}</tbody>
+  </table>`;
+}
+
+function renderDebriefSegmentBenchmarks(rows) {
+  return `<table class="analysis-data-table debrief-table benchmark-table">
+    <thead><tr><th class="sticky-cell">Dimension</th><th>Segment</th><th>Creatives</th><th>Testing cost / sign-up</th><th>Testing D1</th><th>Testing D3</th><th>Testing D7</th></tr></thead>
+    <tbody>${rows
+      .map(
+        (row) => `<tr>
+          <td class="sticky-cell"><strong>${escapeHtml(row.dimension)}</strong></td>
+          <td>${escapeHtml(row.segment)}</td>
+          <td>${integer(row.count)}</td>
+          <td><strong>${debriefMoney(row.cpsu)}</strong></td>
+          <td>${debriefPct(row.d1)}</td>
+          <td>${debriefPct(row.d3)}</td>
+          <td>${debriefPct(row.d7)}</td>
+        </tr>`,
+      )
+      .join("")}</tbody>
+  </table>`;
+}
+
+function renderScaledValidation(rows) {
+  if (!rows.length) {
+    return '<div class="analysis-empty">No promoted creatives have comparable testing and scaled delivery yet.</div>';
+  }
+  return `<table class="analysis-data-table debrief-table scaled-validation-table">
+    <thead><tr><th class="sticky-cell">Creative</th><th>Testing spend</th><th>Scaled spend</th><th>Testing CPSU</th><th>Scaled CPSU</th><th>Testing D1</th><th>Scaled D1</th><th>Testing D3</th><th>Scaled D3</th><th>Testing D7</th><th>Scaled D7</th><th>Confidence</th></tr></thead>
+    <tbody>${rows
+      .map(
+        (row) => `<tr>
+          ${debriefCreativeCell(row)}
+          <td>${money(row.testing.spend)}</td>
+          <td>${money(row.scaled.spend)}</td>
+          <td>${debriefMoney(row.testing.cpsu)}</td>
+          <td>${debriefMoney(row.scaled.cpsu)}</td>
+          <td>${debriefStageRetention(row, 1)}</td>
+          <td>${debriefStageRetention(row, 1, "scaled")}</td>
+          <td>${debriefStageRetention(row, 3)}</td>
+          <td>${debriefStageRetention(row, 3, "scaled")}</td>
+          <td>${debriefStageRetention(row, 7)}</td>
+          <td>${debriefStageRetention(row, 7, "scaled")}</td>
+          <td>${debriefConfidenceChip(row.testing.confidence)}</td>
         </tr>`,
       )
       .join("")}</tbody>
@@ -2195,22 +2252,30 @@ function filteredDebriefRows() {
     if (bValue == null) return -1;
     return direction === "asc" ? aValue - bValue : bValue - aValue;
   };
+  const testingNumeric = (key, direction = "desc") => (a, b) => {
+    const aValue = a.testing?.[key];
+    const bValue = b.testing?.[key];
+    if (aValue == null && bValue == null) return 0;
+    if (aValue == null) return 1;
+    if (bValue == null) return -1;
+    return direction === "asc" ? aValue - bValue : bValue - aValue;
+  };
   const comparators = {
     newest: (a, b) =>
       (b.uploadedAt ?? "").localeCompare(a.uploadedAt ?? "") ||
       b.spend - a.spend,
     spend: numeric("spend"),
-    testingSpend: numeric("testingSpend"),
+    testingSpend: testingNumeric("spend"),
     scaledSpend: numeric("scaledSpend"),
-    signups: numeric("signups"),
-    cpsu: numeric("cpsu", "asc"),
-    cpi: numeric("cpi", "asc"),
-    d1: numeric("d1"),
-    d3: numeric("d3"),
-    d7: numeric("d7"),
-    costD1: numeric("costPerRetainedD1", "asc"),
-    costD3: numeric("costPerRetainedD3", "asc"),
-    costD7: numeric("costPerRetainedD7", "asc"),
+    signups: testingNumeric("signups"),
+    cpsu: testingNumeric("cpsu", "asc"),
+    cpi: testingNumeric("cpi", "asc"),
+    d1: testingNumeric("d1"),
+    d3: testingNumeric("d3"),
+    d7: testingNumeric("d7"),
+    costD1: testingNumeric("costPerRetainedD1", "asc"),
+    costD3: testingNumeric("costPerRetainedD3", "asc"),
+    costD7: testingNumeric("costPerRetainedD7", "asc"),
     retentionCost: numeric("retentionCostIndex", "asc"),
   };
   return filtered.sort(
@@ -2238,16 +2303,17 @@ function renderDebriefAll() {
     "Total spend",
     "Testing spend",
     "Scaled spend",
-    "Sign-ups",
-    "Cost / sign-up",
-    "CPI",
-    "CTR",
-    "D1",
+    "Testing sign-ups",
+    "Testing cost / sign-up",
+    "Testing CPI",
+    "Testing CTR",
+    "Testing D1",
     "Cost / D1 retained",
-    "D3",
+    "Testing D3",
     "Cost / D3 retained",
-    "D7",
+    "Testing D7",
     "Cost / D7 retained",
+    "Confidence",
   ];
   $("debriefAll").innerHTML = `<table class="analysis-data-table debrief-table"><thead><tr>${headers
     .map((header, index) => `<th class="${index === 0 ? "sticky-cell" : ""}">${header}</th>`)
@@ -2262,16 +2328,17 @@ function renderDebriefAll() {
         <td>${row.promoted ? "Testing + scaled" : "Testing only"}</td>
         <td>${debriefVerdictChip(row)}</td>
         ${debriefSpendCells(row)}
-        <td>${integer(row.signups)}</td>
-        <td><strong>${debriefMoney(row.cpsu)}</strong></td>
-        <td>${debriefMoney(row.cpi)}</td>
-        <td>${pct(row.ctr)}</td>
-        <td>${debriefPct(row.d1)}</td>
+        <td>${integer(row.testing.signups)}</td>
+        <td><strong>${debriefMoney(row.testing.cpsu)}</strong></td>
+        <td>${debriefMoney(row.testing.cpi)}</td>
+        <td>${pct(row.testing.ctr)}</td>
+        <td>${debriefStageRetention(row, 1)}</td>
         <td>${debriefRetentionCost(row, 1)}</td>
-        <td>${debriefPct(row.d3)}</td>
+        <td>${debriefStageRetention(row, 3)}</td>
         <td>${debriefRetentionCost(row, 3)}</td>
-        <td>${debriefPct(row.d7)}</td>
+        <td>${debriefStageRetention(row, 7)}</td>
         <td>${debriefRetentionCost(row, 7)}</td>
+        <td>${debriefConfidenceChip(row.retentionConfidence)}</td>
       </tr>`,
     )
     .join("")}</tbody></table>`;
@@ -2289,9 +2356,11 @@ function renderDebrief() {
   $("debriefSummary").innerHTML = `
     <div class="analysis-kpi primary"><span>Creatives tested</span><strong>${integer(s.tested)}</strong><p>${integer(s.middle)} decided in the middle · ${integer(s.carryover)} uploaded before ${debriefShortDay(s.since)}</p></div>
     <div class="analysis-kpi"><span>Testing spend</span><strong>${money(s.testingSpend, true)}</strong><p>${money(s.scaledSpend, true)} scaled · ${money(s.spend, true)} total</p></div>
-    <div class="analysis-kpi"><span>Cost per sign-up</span><strong>${debriefMoney(s.cpsu)}</strong><p>${integer(s.signups)} sign-ups across tested creatives · typical decided ${debriefMoney(data.typical.cpsu)}</p></div>
+    <div class="analysis-kpi"><span>Testing cost per sign-up</span><strong>${debriefMoney(s.cpsu)}</strong><p>${integer(s.testingSignups)} testing sign-ups · ${integer(s.scaledSignups)} scaled sign-ups</p></div>
     <div class="analysis-kpi"><span>Live now</span><strong>${integer(s.live)}</strong><p>${integer(s.paused)} paused · ${integer(s.promoted)} scaled to main</p></div>`;
   $("debriefBenchmarks").innerHTML = renderDebriefBenchmarks(data.benchmarks);
+  $("debriefSegmentBenchmarks").innerHTML =
+    renderDebriefSegmentBenchmarks(data.segmentBenchmarks);
   $("debriefSources").innerHTML = renderDebriefSources(data.bySource);
   $("debriefWinnersRule").textContent = data.rules.winners;
   $("debriefLosersRule").textContent = data.rules.losers;
@@ -2309,6 +2378,8 @@ function renderDebrief() {
     "No creatives currently combine efficient sign-ups with below-typical mature retention.",
     debriefRetentionRiskReasons,
   );
+  $("debriefScaledValidation").innerHTML =
+    renderScaledValidation(data.scaledValidation);
   $("debriefRules").innerHTML = Object.values(data.rules)
     .map((rule) => `<li>${escapeHtml(rule)}</li>`)
     .join("");

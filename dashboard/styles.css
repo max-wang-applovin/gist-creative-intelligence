@@ -316,6 +316,10 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-chip.live, .debrief-chip.verdict-winner { background: #e3f6ec; color: #18724f; }
 .debrief-chip.testing { background: #f4edff; color: #7448a8; }
 .debrief-chip.scaled { background: #e5edfb; color: #185ecb; }
+.debrief-chip.confidence-high { background: #dff5e9; color: #146743; }
+.debrief-chip.confidence-medium { background: #e5edfb; color: #185ecb; }
+.debrief-chip.confidence-low { background: #fdf1de; color: #9a5d0c; }
+.debrief-chip.confidence-none { background: #eef1f4; color: #68727d; }
 .debrief-chip.carryover, .debrief-chip.verdict-learning { background: #fdf1de; color: #9a5d0c; }
 .debrief-chip.verdict-loser { background: #fde8e8; color: #b23a3a; }
 .debrief-reasons { min-width: 260px; text-align: left !important; white-space: normal; line-height: 1.45; color: #37424d; }

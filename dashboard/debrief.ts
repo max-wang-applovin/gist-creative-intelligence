@@ -20,6 +20,7 @@ const DECISION_MIN_SPEND_AT_DAYS = 100;
 const WINNER_MIN_SIGNUPS = 10;
 const LIST_SIZE = 10;
 const MIN_RETENTION_COHORT = 20;
+const RANKING_MIN_RETENTION_COHORT = 50;
 /** Ignore funnel gaps smaller than ±15% when explaining a verdict. */
 const MIN_REASON_GAP = Math.log(1.15);
 
@@ -32,6 +33,34 @@ export type DebriefSource =
   | "CRM"
   | "Other";
 export type DebriefVerdict = "Winner" | "Loser" | "Middle" | "Learning";
+export type RetentionConfidence = "Low" | "Medium" | "High" | null;
+
+export type DebriefStageMetrics = {
+  spend: number;
+  impressions: number;
+  clicks: number;
+  installs: number;
+  signups: number;
+  ctr: number;
+  cpm: number;
+  cpi: number | null;
+  cpsu: number | null;
+  d1: number | null;
+  d3: number | null;
+  d7: number | null;
+  costPerRetainedD1: number | null;
+  costPerRetainedD3: number | null;
+  costPerRetainedD7: number | null;
+  retainedD1: number;
+  retainedD3: number;
+  retainedD7: number;
+  d1Cohort: number;
+  d3Cohort: number;
+  d7Cohort: number;
+  retentionHorizon: "D1" | "D3" | "D7" | null;
+  retentionCost: number | null;
+  confidence: RetentionConfidence;
+};
 
 export type DebriefCreative = {
   name: string;
@@ -54,6 +83,8 @@ export type DebriefCreative = {
   spend: number;
   testingSpend: number;
   scaledSpend: number;
+  testing: DebriefStageMetrics;
+  scaled: DebriefStageMetrics;
   impressions: number;
   clicks: number;
   ctr: number;
@@ -74,6 +105,7 @@ export type DebriefCreative = {
   retentionHorizon: "D1" | "D3" | "D7" | null;
   retentionCost: number | null;
   retentionCostIndex: number | null;
+  retentionConfidence: RetentionConfidence;
   retainedD1: number;
   retainedD3: number;
   retainedD7: number;
@@ -106,6 +138,11 @@ type DebriefBenchmark = {
   d1: number | null;
   d3: number | null;
   d7: number | null;
+};
+
+type DebriefSegmentBenchmark = DebriefBenchmark & {
+  dimension: "Source" | "OS" | "Format";
+  segment: string;
 };
 
 export type DebriefSourceSummary = {
@@ -142,6 +179,8 @@ export type DebriefPayload = {
     testingSpend: number;
     scaledSpend: number;
     signups: number;
+    testingSignups: number;
+    scaledSignups: number;
     cpsu: number | null;
     since: string;
     until: string;
@@ -173,9 +212,11 @@ export type DebriefPayload = {
     average: DebriefBenchmark;
     best: DebriefBenchmark | null;
   };
+  segmentBenchmarks: DebriefSegmentBenchmark[];
   winners: DebriefCreative[];
   losers: DebriefCreative[];
   retentionRisks: DebriefCreative[];
+  scaledValidation: DebriefCreative[];
   all: DebriefCreative[];
   warnings: string[];
 };
@@ -284,6 +325,81 @@ const ratio = (top: number, bottom: number) => (bottom > 0 ? top / bottom : null
 const pctOf = (top: number, bottom: number) =>
   bottom > 0 ? round2((top / bottom) * 100) : null;
 
+function retentionConfidence(cohort: number): RetentionConfidence {
+  if (cohort < MIN_RETENTION_COHORT) return null;
+  if (cohort < RANKING_MIN_RETENTION_COHORT) return "Low";
+  if (cohort < 200) return "Medium";
+  return "High";
+}
+
+function stageMetrics(acc: StageAcc): DebriefStageMetrics {
+  const d1 =
+    acc.cohortD1 >= MIN_RETENTION_COHORT
+      ? pctOf(acc.retainedD1, acc.cohortD1)
+      : null;
+  const d3 =
+    acc.cohortD3 >= MIN_RETENTION_COHORT
+      ? pctOf(acc.retainedD3, acc.cohortD3)
+      : null;
+  const d7 =
+    acc.cohortD7 >= MIN_RETENTION_COHORT
+      ? pctOf(acc.retainedD7, acc.cohortD7)
+      : null;
+  const retentionHorizon =
+    d7 !== null ? "D7" : d3 !== null ? "D3" : d1 !== null ? "D1" : null;
+  const costPerRetainedD1 =
+    d1 !== null ? ratio(acc.cohortSpendD1, acc.retainedD1) : null;
+  const costPerRetainedD3 =
+    d3 !== null ? ratio(acc.cohortSpendD3, acc.retainedD3) : null;
+  const costPerRetainedD7 =
+    d7 !== null ? ratio(acc.cohortSpendD7, acc.retainedD7) : null;
+  const retentionCost =
+    retentionHorizon === "D7"
+      ? costPerRetainedD7
+      : retentionHorizon === "D3"
+        ? costPerRetainedD3
+        : retentionHorizon === "D1"
+          ? costPerRetainedD1
+          : null;
+  const cohort =
+    retentionHorizon === "D7"
+      ? acc.cohortD7
+      : retentionHorizon === "D3"
+        ? acc.cohortD3
+        : retentionHorizon === "D1"
+          ? acc.cohortD1
+          : 0;
+  return {
+    spend: round2(acc.spend),
+    impressions: acc.impressions,
+    clicks: acc.clicks,
+    installs: acc.installs,
+    signups: acc.signups,
+    ctr: pctOf(acc.clicks, acc.impressions) ?? 0,
+    cpm: round2(acc.impressions > 0 ? (acc.spend / acc.impressions) * 1000 : 0),
+    cpi: ratio(acc.spend, acc.installs),
+    cpsu: ratio(acc.spend, acc.signups),
+    d1,
+    d3,
+    d7,
+    costPerRetainedD1:
+      costPerRetainedD1 === null ? null : round2(costPerRetainedD1),
+    costPerRetainedD3:
+      costPerRetainedD3 === null ? null : round2(costPerRetainedD3),
+    costPerRetainedD7:
+      costPerRetainedD7 === null ? null : round2(costPerRetainedD7),
+    retainedD1: acc.retainedD1,
+    retainedD3: acc.retainedD3,
+    retainedD7: acc.retainedD7,
+    d1Cohort: acc.cohortD1,
+    d3Cohort: acc.cohortD3,
+    d7Cohort: acc.cohortD7,
+    retentionHorizon,
+    retentionCost: retentionCost === null ? null : round2(retentionCost),
+    confidence: retentionConfidence(cohort),
+  };
+}
+
 function creativeKey(raw: string): string {
   return normalizeCreativeName(cleanAdjustCreativeName(raw));
 }
@@ -361,18 +477,12 @@ export function parseCreativeName(name: string): {
   };
 }
 
-type Acc = {
-  key: string;
-  name: string;
+type StageAcc = {
   spend: number;
-  testingSpend: number;
-  testingImpressions: number;
-  mainSpend: number;
   impressions: number;
   clicks: number;
   installs: number;
   signups: number;
-  testingSignups: number;
   retainedD1: number;
   retainedD3: number;
   retainedD7: number;
@@ -382,15 +492,63 @@ type Acc = {
   cohortD1: number;
   cohortD3: number;
   cohortD7: number;
+};
+
+type Acc = StageAcc & {
+  key: string;
+  name: string;
+  testingImpressions: number;
+  testingSignups: number;
+  testing: StageAcc;
+  scaled: StageAcc;
   campaigns: Set<string>;
   adSets: Set<string>;
 };
+
+function emptyStageAcc(): StageAcc {
+  return {
+    spend: 0,
+    impressions: 0,
+    clicks: 0,
+    installs: 0,
+    signups: 0,
+    retainedD1: 0,
+    retainedD3: 0,
+    retainedD7: 0,
+    cohortSpendD1: 0,
+    cohortSpendD3: 0,
+    cohortSpendD7: 0,
+    cohortD1: 0,
+    cohortD3: 0,
+    cohortD7: 0,
+  };
+}
 
 function median(values: number[]): number | null {
   const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
   if (sorted.length === 0) return null;
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+function benchmarkForRows(
+  label: string,
+  rows: DebriefCreative[],
+): DebriefBenchmark {
+  const total = (key: keyof DebriefStageMetrics) =>
+    rows.reduce(
+      (sum, creative) => sum + Number(creative.testing[key] || 0),
+      0,
+    );
+  return {
+    label,
+    creativeName: null,
+    count: rows.length,
+    cpsu: ratio(total("spend"), total("signups")),
+    d1: pctOf(total("retainedD1"), total("d1Cohort")),
+    d3: pctOf(total("retainedD3"), total("d3Cohort")),
+    d7: pctOf(total("retainedD7"), total("d7Cohort")),
+  };
 }
 
 const fmtPct = (value: number) =>
@@ -416,6 +574,7 @@ type Signal = {
 };
 
 function signalsFor(creative: DebriefCreative, typical: Typical): Signal[] {
+  const metrics = creative.testing;
   const signals: Signal[] = [];
   const push = (
     metric: Signal["metric"],
@@ -428,18 +587,28 @@ function signalsFor(creative: DebriefCreative, typical: Typical): Signal[] {
     const score = higherIsBetter ? Math.log(safe / base) : Math.log(base / safe);
     signals.push({ metric, score, value, typical: base });
   };
-  if (creative.impressions > 0) {
-    push("ctr", creative.ctr, typical.ctr, true);
-    push("cpm", creative.cpm, typical.cpm, false);
+  if (metrics.impressions > 0) {
+    push("ctr", metrics.ctr, typical.ctr, true);
+    push("cpm", metrics.cpm, typical.cpm, false);
   }
-  push("clickToInstall", creative.clickToInstall, typical.clickToInstall, true);
-  push("installToSignup", creative.installToSignup, typical.installToSignup, true);
+  push(
+    "clickToInstall",
+    pctOf(metrics.installs, metrics.clicks),
+    typical.clickToInstall,
+    true,
+  );
+  push(
+    "installToSignup",
+    pctOf(metrics.signups, metrics.installs),
+    typical.installToSignup,
+    true,
+  );
   if (creative.retentionHorizon === "D7") {
-    push("d7", creative.d7, typical.d7, true);
+    push("d7", metrics.d7, typical.d7, true);
   } else if (creative.retentionHorizon === "D3") {
-    push("d3", creative.d3, typical.d3, true);
+    push("d3", metrics.d3, typical.d3, true);
   } else if (creative.retentionHorizon === "D1") {
-    push("d1", creative.d1, typical.d1, true);
+    push("d1", metrics.d1, typical.d1, true);
   }
   return signals;
 }
@@ -453,7 +622,7 @@ function describe(
   const v = signal.value;
   const t = signal.typical;
   if (!good && v === 0 && signal.metric === "clickToInstall") {
-    return `No installs from ${creative.clicks.toLocaleString("en-US")} clicks`;
+    return `No installs from ${creative.testing.clicks.toLocaleString("en-US")} testing clicks`;
   }
   switch (signal.metric) {
     case "ctr":
@@ -500,8 +669,10 @@ function reasonsFor(
   good: boolean,
 ): string[] {
   const reasons: string[] = [];
-  if (!good && creative.signups === 0) {
-    reasons.push(`No sign-ups from ${fmtMoney(creative.spend)} spend`);
+  if (!good && creative.testing.signups === 0) {
+    reasons.push(
+      `No sign-ups from ${fmtMoney(creative.testing.spend)} testing spend`,
+    );
   }
   const signals = signalsFor(creative, typical);
   const ranked = signals
@@ -511,7 +682,12 @@ function reasonsFor(
     .sort((a, b) => (good ? b.score - a.score : a.score - b.score));
   for (const signal of ranked) {
     if (reasons.length >= 2) break;
-    if (creative.signups === 0 && signal.metric === "installToSignup") continue;
+    if (
+      creative.testing.signups === 0 &&
+      signal.metric === "installToSignup"
+    ) {
+      continue;
+    }
     reasons.push(describe(signal, good, signals, creative));
   }
   const typicalRetentionCost =
@@ -535,13 +711,13 @@ function reasonsFor(
     );
   } else if (
     reasons.length === 0 &&
-    creative.cpsu !== null &&
+    creative.testing.cpsu !== null &&
     typical.cpsu !== null
   ) {
     reasons.push(
       good
-        ? `Efficient across the funnel (${fmtMoney(creative.cpsu)} per sign-up vs ${fmtMoney(typical.cpsu)} typical)`
-        : `Slightly worse at every step (${fmtMoney(creative.cpsu)} per sign-up vs ${fmtMoney(typical.cpsu)} typical)`,
+        ? `Efficient testing funnel (${fmtMoney(creative.testing.cpsu)} per sign-up vs ${fmtMoney(typical.cpsu)} typical)`
+        : `Weak testing funnel (${fmtMoney(creative.testing.cpsu)} per sign-up vs ${fmtMoney(typical.cpsu)} typical)`,
     );
   }
   return reasons;
@@ -579,7 +755,7 @@ function ref(creative: DebriefCreative | undefined): CreativeRef | null {
   return {
     name: creative.name,
     readableName: creative.readableName,
-    cpsu: creative.cpsu,
+    cpsu: creative.testing.cpsu,
     retentionHorizon: creative.retentionHorizon,
     retentionCost: creative.retentionCost,
     spend: creative.spend,
@@ -591,10 +767,10 @@ function compareBestFirst(a: DebriefCreative, b: DebriefCreative): number {
   const aCost = a.retentionCostIndex ?? Number.POSITIVE_INFINITY;
   const bCost = b.retentionCostIndex ?? Number.POSITIVE_INFINITY;
   if (aCost !== bCost) return aCost - bCost;
-  const aSignupCost = a.cpsu ?? Number.POSITIVE_INFINITY;
-  const bSignupCost = b.cpsu ?? Number.POSITIVE_INFINITY;
+  const aSignupCost = a.testing.cpsu ?? Number.POSITIVE_INFINITY;
+  const bSignupCost = b.testing.cpsu ?? Number.POSITIVE_INFINITY;
   if (aSignupCost !== bSignupCost) return aSignupCost - bSignupCost;
-  return b.spend - a.spend;
+  return b.testing.spend - a.testing.spend;
 }
 
 /** Worst first: no retained users, then highest normalized retained-user cost. */
@@ -602,10 +778,10 @@ function compareWorstFirst(a: DebriefCreative, b: DebriefCreative): number {
   const aCost = a.retentionCostIndex ?? Number.POSITIVE_INFINITY;
   const bCost = b.retentionCostIndex ?? Number.POSITIVE_INFINITY;
   if (aCost !== bCost) return bCost - aCost;
-  const aSignupCost = a.cpsu ?? Number.POSITIVE_INFINITY;
-  const bSignupCost = b.cpsu ?? Number.POSITIVE_INFINITY;
+  const aSignupCost = a.testing.cpsu ?? Number.POSITIVE_INFINITY;
+  const bSignupCost = b.testing.cpsu ?? Number.POSITIVE_INFINITY;
   if (aSignupCost !== bSignupCost) return bSignupCost - aSignupCost;
-  return b.spend - a.spend;
+  return b.testing.spend - a.testing.spend;
 }
 
 async function buildDebrief(range: {
@@ -632,7 +808,7 @@ async function buildDebrief(range: {
       apiToken,
       app.token,
       range,
-      ["day", "partner_name", "creative_network"],
+      ["day", "partner_name", "campaign_network", "creative_network"],
       [
         "installs",
         "network_cost",
@@ -666,27 +842,15 @@ async function buildDebrief(range: {
     const adSet = cleanAdjustCreativeName(row.adgroup_network?.trim() || "");
     let acc = byKey.get(key);
     if (!acc) {
+      const totals = emptyStageAcc();
       acc = {
         key,
         name,
-        spend: 0,
-        testingSpend: 0,
+        ...totals,
         testingImpressions: 0,
-        mainSpend: 0,
-        impressions: 0,
-        clicks: 0,
-        installs: 0,
-        signups: 0,
         testingSignups: 0,
-        retainedD1: 0,
-        retainedD3: 0,
-        retainedD7: 0,
-        cohortSpendD1: 0,
-        cohortSpendD3: 0,
-        cohortSpendD7: 0,
-        cohortD1: 0,
-        cohortD3: 0,
-        cohortD7: 0,
+        testing: emptyStageAcc(),
+        scaled: emptyStageAcc(),
         campaigns: new Set(),
         adSets: new Set(),
       };
@@ -694,51 +858,72 @@ async function buildDebrief(range: {
     }
     const spend = num(row.network_cost);
     const impressions = num(row.impressions);
+    const clicks = num(row.clicks);
+    const installs = num(row.installs);
     const signups = num(row.post_install_account_created_events);
     acc.spend += spend;
     acc.impressions += impressions;
-    acc.clicks += num(row.clicks);
-    acc.installs += num(row.installs);
+    acc.clicks += clicks;
+    acc.installs += installs;
     acc.signups += signups;
     if (spend > 0 || impressions > 0) {
       if (campaign) acc.campaigns.add(campaign);
       if (adSet) acc.adSets.add(adSet);
     }
     if (isTestingCampaign(campaign)) {
-      acc.testingSpend += spend;
+      acc.testing.spend += spend;
+      acc.testing.impressions += impressions;
+      acc.testing.clicks += clicks;
+      acc.testing.installs += installs;
+      acc.testing.signups += signups;
       acc.testingImpressions += impressions;
       acc.testingSignups += signups;
     } else if (isMainCampaign(campaign)) {
-      acc.mainSpend += spend;
+      acc.scaled.spend += spend;
+      acc.scaled.impressions += impressions;
+      acc.scaled.clicks += clicks;
+      acc.scaled.installs += installs;
+      acc.scaled.signups += signups;
     }
   }
 
   const cutoffD1 = fullMatureCutoff(1);
   const cutoffD3 = fullMatureCutoff(3);
   const cutoffD7 = fullMatureCutoff(7);
+  const addMatureCohort = (
+    target: StageAcc,
+    row: AdjustReportRow,
+  ): void => {
+    const day = row.day ?? "";
+    const installs = num(row.installs);
+    const spend = num(row.network_cost);
+    if (day && day <= cutoffD1) {
+      target.retainedD1 += num(row.retained_users_d1);
+      target.cohortD1 += installs;
+      target.cohortSpendD1 += spend;
+    }
+    if (day && day <= cutoffD3) {
+      target.retainedD3 += num(row.retained_users_d3);
+      target.cohortD3 += installs;
+      target.cohortSpendD3 += spend;
+    }
+    if (day && day <= cutoffD7) {
+      target.retainedD7 += num(row.retained_users_d7);
+      target.cohortD7 += installs;
+      target.cohortSpendD7 += spend;
+    }
+  };
   for (const row of retentionRows) {
     const name = usableName(row);
     if (!name) continue;
     const acc = byKey.get(normalizeCreativeName(name));
     if (!acc) continue;
-    const day = row.day ?? "";
-    const installs = num(row.installs);
-    const spend = num(row.network_cost);
-    if (day && day <= cutoffD1) {
-      acc.retainedD1 += num(row.retained_users_d1);
-      acc.cohortD1 += installs;
-      acc.cohortSpendD1 += spend;
-    }
-    if (day && day <= cutoffD3) {
-      acc.retainedD3 += num(row.retained_users_d3);
-      acc.cohortD3 += installs;
-      acc.cohortSpendD3 += spend;
-    }
-    if (day && day <= cutoffD7) {
-      acc.retainedD7 += num(row.retained_users_d7);
-      acc.cohortD7 += installs;
-      acc.cohortSpendD7 += spend;
-    }
+    addMatureCohort(acc, row);
+    const campaign = cleanAdjustCreativeName(
+      row.campaign_network?.trim() || "",
+    );
+    if (isTestingCampaign(campaign)) addMatureCohort(acc.testing, row);
+    else if (isMainCampaign(campaign)) addMatureCohort(acc.scaled, row);
   }
 
   const adsByKey = new Map<string, MetaAd[]>();
@@ -753,7 +938,7 @@ async function buildDebrief(range: {
   const tested: DebriefCreative[] = [];
   let unmatched = 0;
   for (const acc of byKey.values()) {
-    if (acc.testingSpend <= 0 && acc.testingImpressions <= 0) continue;
+    if (acc.testing.spend <= 0 && acc.testingImpressions <= 0) continue;
     const ads = (adsByKey.get(acc.key) ?? []).sort((a, b) =>
       (a.createdTime ?? "9999").localeCompare(b.createdTime ?? "9999"),
     );
@@ -784,42 +969,14 @@ async function buildDebrief(range: {
     const ios = campaigns.some((name) => /ios/i.test(name));
     const android = campaigns.some((name) => /android/i.test(name));
 
-    const spend = round2(acc.spend);
+    const overall = stageMetrics(acc);
+    const testing = stageMetrics(acc.testing);
+    const scaled = stageMetrics(acc.scaled);
     const eligible =
-      spend >= DECISION_SPEND ||
+      testing.spend >= DECISION_SPEND ||
       (daysLive !== null &&
         daysLive >= DECISION_DAYS &&
-        spend >= DECISION_MIN_SPEND_AT_DAYS);
-    const cpsu = ratio(acc.spend, acc.signups);
-    const cpi = ratio(acc.spend, acc.installs);
-    const d1 =
-      acc.cohortD1 >= MIN_RETENTION_COHORT
-        ? pctOf(acc.retainedD1, acc.cohortD1)
-        : null;
-    const d3 =
-      acc.cohortD3 >= MIN_RETENTION_COHORT
-        ? pctOf(acc.retainedD3, acc.cohortD3)
-        : null;
-    const d7 =
-      acc.cohortD7 >= MIN_RETENTION_COHORT
-        ? pctOf(acc.retainedD7, acc.cohortD7)
-        : null;
-    const costPerRetainedD1 =
-      d1 !== null ? ratio(acc.cohortSpendD1, acc.retainedD1) : null;
-    const costPerRetainedD3 =
-      d3 !== null ? ratio(acc.cohortSpendD3, acc.retainedD3) : null;
-    const costPerRetainedD7 =
-      d7 !== null ? ratio(acc.cohortSpendD7, acc.retainedD7) : null;
-    const retentionHorizon =
-      d7 !== null ? "D7" : d3 !== null ? "D3" : d1 !== null ? "D1" : null;
-    const retentionCost =
-      retentionHorizon === "D7"
-        ? costPerRetainedD7
-        : retentionHorizon === "D3"
-          ? costPerRetainedD3
-          : retentionHorizon === "D1"
-            ? costPerRetainedD1
-            : null;
+        testing.spend >= DECISION_MIN_SPEND_AT_DAYS);
 
     tested.push({
       name: acc.name,
@@ -841,41 +998,46 @@ async function buildDebrief(range: {
       carryover: uploadedDate !== null && uploadedDate < range.since,
       daysLive,
       status: ads.some((ad) => ad.effectiveStatus === "ACTIVE") ? "Live" : "Paused",
-      promoted: acc.mainSpend > 0,
-      spend,
-      testingSpend: round2(acc.testingSpend),
-      scaledSpend: round2(acc.mainSpend),
-      impressions: acc.impressions,
-      clicks: acc.clicks,
-      ctr: pctOf(acc.clicks, acc.impressions) ?? 0,
-      cpm: round2(acc.impressions > 0 ? (acc.spend / acc.impressions) * 1000 : 0),
-      installs: acc.installs,
-      cpi: cpi === null ? null : round2(cpi),
-      clickToInstall: pctOf(acc.installs, acc.clicks),
-      installToSignup: pctOf(acc.signups, acc.installs),
-      signups: acc.signups,
-      testingSignups: acc.testingSignups,
-      cpsu: cpsu === null ? null : round2(cpsu),
-      d1,
-      d3,
-      d7,
-      costPerRetainedD1:
-        costPerRetainedD1 === null ? null : round2(costPerRetainedD1),
-      costPerRetainedD3:
-        costPerRetainedD3 === null ? null : round2(costPerRetainedD3),
-      costPerRetainedD7:
-        costPerRetainedD7 === null ? null : round2(costPerRetainedD7),
-      retentionHorizon,
-      retentionCost: retentionCost === null ? null : round2(retentionCost),
+      promoted: scaled.spend > 0,
+      spend: overall.spend,
+      testingSpend: testing.spend,
+      scaledSpend: scaled.spend,
+      testing,
+      scaled,
+      impressions: overall.impressions,
+      clicks: overall.clicks,
+      ctr: overall.ctr,
+      cpm: overall.cpm,
+      installs: overall.installs,
+      cpi: overall.cpi,
+      clickToInstall: pctOf(overall.installs, overall.clicks),
+      installToSignup: pctOf(overall.signups, overall.installs),
+      signups: overall.signups,
+      testingSignups: testing.signups,
+      cpsu: overall.cpsu,
+      d1: overall.d1,
+      d3: overall.d3,
+      d7: overall.d7,
+      costPerRetainedD1: overall.costPerRetainedD1,
+      costPerRetainedD3: overall.costPerRetainedD3,
+      costPerRetainedD7: overall.costPerRetainedD7,
+      retentionHorizon: testing.retentionHorizon,
+      retentionCost: testing.retentionCost,
       retentionCostIndex: null,
-      retainedD1: acc.retainedD1,
-      retainedD3: acc.retainedD3,
-      retainedD7: acc.retainedD7,
-      d1Cohort: acc.cohortD1,
-      d3Cohort: acc.cohortD3,
-      d7Cohort: acc.cohortD7,
+      retentionConfidence: testing.confidence,
+      retainedD1: overall.retainedD1,
+      retainedD3: overall.retainedD3,
+      retainedD7: overall.retainedD7,
+      d1Cohort: overall.d1Cohort,
+      d3Cohort: overall.d3Cohort,
+      d7Cohort: overall.d7Cohort,
       eligible,
-      verdict: eligible && retentionHorizon ? "Middle" : "Learning",
+      verdict:
+        eligible &&
+        testing.retentionHorizon &&
+        testing.confidence !== "Low"
+          ? "Middle"
+          : "Learning",
       reasons: [],
       thumbnailUrl: ads.find((ad) => ad.thumbnailUrl)?.thumbnailUrl ?? null,
       adIds: ads.map((ad) => ad.id),
@@ -891,45 +1053,78 @@ async function buildDebrief(range: {
 
   const eligible = tested.filter((creative) => creative.eligible);
   const typical: Typical = {
-    ctr: median(eligible.filter((c) => c.impressions > 0).map((c) => c.ctr)),
-    cpm: median(eligible.filter((c) => c.impressions > 0).map((c) => c.cpm)),
+    ctr: median(
+      eligible
+        .filter((c) => c.testing.impressions > 0)
+        .map((c) => c.testing.ctr),
+    ),
+    cpm: median(
+      eligible
+        .filter((c) => c.testing.impressions > 0)
+        .map((c) => c.testing.cpm),
+    ),
     clickToInstall: median(
-      eligible.flatMap((c) => (c.clickToInstall === null ? [] : [c.clickToInstall])),
+      eligible.flatMap((c) => {
+        const value = pctOf(c.testing.installs, c.testing.clicks);
+        return value === null ? [] : [value];
+      }),
     ),
     installToSignup: median(
-      eligible.flatMap((c) => (c.installToSignup === null ? [] : [c.installToSignup])),
+      eligible.flatMap((c) => {
+        const value = pctOf(c.testing.signups, c.testing.installs);
+        return value === null ? [] : [value];
+      }),
     ),
     d1: median(
       eligible.flatMap((c) =>
-        c.d1 !== null && c.d1Cohort >= MIN_RETENTION_COHORT ? [c.d1] : [],
+        c.testing.d1 !== null &&
+        c.testing.d1Cohort >= MIN_RETENTION_COHORT
+          ? [c.testing.d1]
+          : [],
       ),
     ),
     d3: median(
       eligible.flatMap((c) =>
-        c.d3 !== null && c.d3Cohort >= MIN_RETENTION_COHORT ? [c.d3] : [],
+        c.testing.d3 !== null &&
+        c.testing.d3Cohort >= MIN_RETENTION_COHORT
+          ? [c.testing.d3]
+          : [],
       ),
     ),
     d7: median(
       eligible.flatMap((c) =>
-        c.d7 !== null && c.d7Cohort >= MIN_RETENTION_COHORT ? [c.d7] : [],
+        c.testing.d7 !== null &&
+        c.testing.d7Cohort >= MIN_RETENTION_COHORT
+          ? [c.testing.d7]
+          : [],
       ),
     ),
     costPerRetainedD1: median(
       eligible.flatMap((c) =>
-        c.costPerRetainedD1 === null ? [] : [c.costPerRetainedD1],
+        c.testing.costPerRetainedD1 === null
+          ? []
+          : [c.testing.costPerRetainedD1],
       ),
     ),
     costPerRetainedD3: median(
       eligible.flatMap((c) =>
-        c.costPerRetainedD3 === null ? [] : [c.costPerRetainedD3],
+        c.testing.costPerRetainedD3 === null
+          ? []
+          : [c.testing.costPerRetainedD3],
       ),
     ),
     costPerRetainedD7: median(
       eligible.flatMap((c) =>
-        c.costPerRetainedD7 === null ? [] : [c.costPerRetainedD7],
+        c.testing.costPerRetainedD7 === null
+          ? []
+          : [c.testing.costPerRetainedD7],
       ),
     ),
-    cpsu: median(eligible.flatMap((c) => (c.cpsu === null ? [] : [c.cpsu]))),
+    cpsu: median(
+      eligible.flatMap((c) =>
+        c.testing.cpsu === null ? [] : [c.testing.cpsu],
+      ),
+    ),
   };
   for (const key of Object.keys(typical) as (keyof Typical)[]) {
     const value = typical[key];
@@ -952,12 +1147,15 @@ async function buildDebrief(range: {
   }
 
   const ranked = eligible.filter(
-    (creative) => !creative.carryover && creative.retentionHorizon !== null,
+    (creative) =>
+      !creative.carryover &&
+      creative.retentionHorizon !== null &&
+      creative.retentionConfidence !== "Low",
   );
   const winners = ranked
     .filter(
       (creative) =>
-        creative.signups >= WINNER_MIN_SIGNUPS &&
+        creative.testing.signups >= WINNER_MIN_SIGNUPS &&
         creative.retentionCostIndex !== null,
     )
     .sort(compareBestFirst)
@@ -978,11 +1176,11 @@ async function buildDebrief(range: {
 
   const retentionRate = (creative: DebriefCreative): number | null =>
     creative.retentionHorizon === "D7"
-      ? creative.d7
+      ? creative.testing.d7
       : creative.retentionHorizon === "D3"
-        ? creative.d3
+        ? creative.testing.d3
         : creative.retentionHorizon === "D1"
-          ? creative.d1
+          ? creative.testing.d1
           : null;
   const typicalRetention = (creative: DebriefCreative): number | null =>
     creative.retentionHorizon === "D7"
@@ -997,10 +1195,10 @@ async function buildDebrief(range: {
       const rate = retentionRate(creative);
       const baseline = typicalRetention(creative);
       return (
-        creative.signups >= WINNER_MIN_SIGNUPS &&
-        creative.cpsu !== null &&
+        creative.testing.signups >= WINNER_MIN_SIGNUPS &&
+        creative.testing.cpsu !== null &&
         typical.cpsu !== null &&
-        creative.cpsu <= typical.cpsu &&
+        creative.testing.cpsu <= typical.cpsu &&
         rate !== null &&
         baseline !== null &&
         rate < baseline
@@ -1015,29 +1213,49 @@ async function buildDebrief(range: {
     })
     .slice(0, LIST_SIZE);
 
-  const total = (key: keyof DebriefCreative) =>
-    ranked.reduce((sum, creative) => sum + Number(creative[key] || 0), 0);
-  const benchmarkAverage: DebriefBenchmark = {
-    label: "Eligible weighted average",
-    creativeName: null,
-    count: ranked.length,
-    cpsu: ratio(total("spend"), total("signups")),
-    d1: pctOf(total("retainedD1"), total("d1Cohort")),
-    d3: pctOf(total("retainedD3"), total("d3Cohort")),
-    d7: pctOf(total("retainedD7"), total("d7Cohort")),
-  };
+  const benchmarkAverage = benchmarkForRows(
+    "Eligible testing weighted average",
+    ranked,
+  );
   const best = winners[0];
   const benchmarkBest: DebriefBenchmark | null = best
     ? {
         label: "Best retention-adjusted winner",
         creativeName: best.readableName,
         count: 1,
-        cpsu: best.cpsu,
-        d1: best.d1,
-        d3: best.d3,
-        d7: best.d7,
+        cpsu: best.testing.cpsu,
+        d1: best.testing.d1,
+        d3: best.testing.d3,
+        d7: best.testing.d7,
       }
     : null;
+  const segmentBenchmarks: DebriefSegmentBenchmark[] = [];
+  for (const [dimension, valueFor] of [
+    ["Source", (creative: DebriefCreative) => creative.source],
+    ["OS", (creative: DebriefCreative) => creative.os],
+    ["Format", (creative: DebriefCreative) => creative.format],
+  ] as const) {
+    const groups = new Map<string, DebriefCreative[]>();
+    for (const creative of ranked) {
+      const segment = valueFor(creative);
+      const group = groups.get(segment);
+      if (group) group.push(creative);
+      else groups.set(segment, [creative]);
+    }
+    for (const [segment, group] of groups) {
+      segmentBenchmarks.push({
+        dimension,
+        segment,
+        ...benchmarkForRows(`${dimension}: ${segment}`, group),
+      });
+    }
+  }
+  segmentBenchmarks.sort(
+    (a, b) =>
+      a.dimension.localeCompare(b.dimension) ||
+      b.count - a.count ||
+      a.segment.localeCompare(b.segment),
+  );
 
   const all = [...tested].sort(
     (a, b) =>
@@ -1054,13 +1272,18 @@ async function buildDebrief(range: {
   const bySource: DebriefSourceSummary[] = [...sources.entries()]
     .map(([source, list]) => {
       const spend = list.reduce((sum, c) => sum + c.spend, 0);
-      const signups = list.reduce((sum, c) => sum + c.signups, 0);
+      const signups = list.reduce((sum, c) => sum + c.testing.signups, 0);
       const ranked = list
-        .filter((c) => c.eligible && c.retentionHorizon !== null)
+        .filter(
+          (c) =>
+            c.eligible &&
+            c.retentionHorizon !== null &&
+            c.retentionConfidence !== "Low",
+        )
         .sort(compareBestFirst);
       const withSignups = ranked.filter(
         (c) =>
-          c.signups >= WINNER_MIN_SIGNUPS &&
+          c.testing.signups >= WINNER_MIN_SIGNUPS &&
           c.retentionCostIndex !== null,
       );
       const worst = [...ranked].sort(compareWorstFirst)[0];
@@ -1071,7 +1294,13 @@ async function buildDebrief(range: {
         testingSpend: round2(list.reduce((sum, c) => sum + c.testingSpend, 0)),
         scaledSpend: round2(list.reduce((sum, c) => sum + c.scaledSpend, 0)),
         signups,
-        cpsu: signups > 0 ? round2(spend / signups) : null,
+        cpsu:
+          signups > 0
+            ? round2(
+                list.reduce((sum, c) => sum + c.testing.spend, 0) /
+                  signups,
+              )
+            : null,
         winners: list.filter((c) => c.verdict === "Winner").length,
         losers: list.filter((c) => c.verdict === "Loser").length,
         learning: list.filter((c) => c.verdict === "Learning").length,
@@ -1084,6 +1313,18 @@ async function buildDebrief(range: {
 
   const totalSpend = tested.reduce((sum, c) => sum + c.spend, 0);
   const totalSignups = tested.reduce((sum, c) => sum + c.signups, 0);
+  const totalTestingSignups = tested.reduce(
+    (sum, c) => sum + c.testing.signups,
+    0,
+  );
+  const totalScaledSignups = tested.reduce(
+    (sum, c) => sum + c.scaled.signups,
+    0,
+  );
+  const totalTestingSpend = tested.reduce(
+    (sum, c) => sum + c.testing.spend,
+    0,
+  );
   const count = (verdict: DebriefVerdict) =>
     tested.filter((c) => c.verdict === verdict).length;
 
@@ -1105,19 +1346,24 @@ async function buildDebrief(range: {
       testingSpend: round2(tested.reduce((sum, c) => sum + c.testingSpend, 0)),
       scaledSpend: round2(tested.reduce((sum, c) => sum + c.scaledSpend, 0)),
       signups: totalSignups,
-      cpsu: totalSignups > 0 ? round2(totalSpend / totalSignups) : null,
+      testingSignups: totalTestingSignups,
+      scaledSignups: totalScaledSignups,
+      cpsu:
+        totalTestingSignups > 0
+          ? round2(totalTestingSpend / totalTestingSignups)
+          : null,
       since: range.since,
       until: range.until,
     },
     rules: {
       tested:
-        "Delivered in a Meta campaign whose name contains “Testing” during the window. Totals include the creative’s main-campaign delivery too.",
-      eligible: `Decided once total spend ≥ $${DECISION_SPEND}, or ≥ ${DECISION_DAYS} days since upload with ≥ $${DECISION_MIN_SPEND_AT_DAYS} spend. Ranking also requires a mature retention cohort with ≥ ${MIN_RETENTION_COHORT} installs; everything else is still learning.`,
-      winners: `${LIST_SIZE} lowest cost per retained user among decided creatives uploaded in the window with ≥ ${WINNER_MIN_SIGNUPS} sign-ups. Uses D7 when mature, otherwise D3 then D1, normalized against the typical cost at that horizon.`,
-      losers: `${LIST_SIZE} highest retention-adjusted costs among the other decided creatives uploaded in the window; mature cohorts with zero retained users rank worst. Older creatives are listed but not ranked.`,
+        "Delivered in a Meta campaign whose name contains “Testing” during the window. Test verdicts use testing-campaign delivery only; scaled delivery is shown separately.",
+      eligible: `Decided once testing spend ≥ $${DECISION_SPEND}, or ≥ ${DECISION_DAYS} days since upload with ≥ $${DECISION_MIN_SPEND_AT_DAYS} testing spend. Ranking requires ≥ ${RANKING_MIN_RETENTION_COHORT} mature testing installs (medium/high confidence); smaller cohorts remain learning.`,
+      winners: `${LIST_SIZE} lowest testing cost per retained user among decided creatives uploaded in the window with ≥ ${WINNER_MIN_SIGNUPS} testing sign-ups. Uses testing D7 when mature, otherwise D3 then D1, normalized against the typical testing cost at that horizon.`,
+      losers: `${LIST_SIZE} highest testing retention-adjusted costs among the other decided creatives uploaded in the window; mature testing cohorts with zero retained users rank worst. Older creatives are listed but not ranked.`,
       promoted: "Scaled = also spent in a main “Leads_CBO on” campaign; Testing only = no main-campaign spend.",
-      retention: `D1/D3/D7 = retained users / installs from fully matured Adjust cohorts. Cost per retained user uses spend from those same mature cohorts, avoiding immature-spend bias.`,
-      retentionRisks: `Good sign-ups, weak retention = ≥ ${WINNER_MIN_SIGNUPS} sign-ups and cost per sign-up at or below typical, but retention below typical at the most mature available horizon.`,
+      retention: `D1/D3/D7 = retained users / installs from fully matured testing cohorts. Cost per retained user uses testing spend from those same cohorts. Confidence: low ${MIN_RETENTION_COHORT}–${RANKING_MIN_RETENTION_COHORT - 1}, medium ${RANKING_MIN_RETENTION_COHORT}–199, high 200+ mature installs.`,
+      retentionRisks: `Good sign-ups, weak retention = ≥ ${WINNER_MIN_SIGNUPS} testing sign-ups and testing cost per sign-up at or below typical, but testing retention below typical at the most mature available horizon.`,
     },
     typical,
     bySource,
@@ -1125,9 +1371,22 @@ async function buildDebrief(range: {
       average: benchmarkAverage,
       best: benchmarkBest,
     },
+    segmentBenchmarks,
     winners,
     losers,
     retentionRisks,
+    scaledValidation: tested
+      .filter(
+        (creative) =>
+          creative.promoted &&
+          creative.testing.retentionHorizon !== null &&
+          creative.scaled.spend > 0,
+      )
+      .sort(
+        (a, b) =>
+          b.scaled.spend - a.scaled.spend ||
+          compareBestFirst(a, b),
+      ),
     all,
     warnings,
   };
