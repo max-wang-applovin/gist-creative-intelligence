@@ -325,12 +325,6 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-preview-button { flex: 0 0 auto; width: 40px; height: 50px; overflow: hidden; border: 0; border-radius: 5px; padding: 0; background: #eef1f4; }
 .debrief-preview-button img { width: 100%; height: 100%; transition: transform .15s ease; }
 .debrief-preview-button:hover img { transform: scale(1.05); }
-.debrief-hover-preview { position: fixed; z-index: 100; width: 280px; height: 360px; overflow: hidden; border: 1px solid #d8dce1; border-radius: 10px; background: #111315; box-shadow: 0 18px 50px rgba(0,0,0,.38); pointer-events: none; }
-.debrief-hover-preview img, .debrief-hover-preview iframe { width: 100%; height: 310px; border: 0; object-fit: cover; background: white; }
-.debrief-hover-preview > div { height: 50px; display: grid; align-content: center; padding: 6px 9px; background: #202429; color: white; }
-.debrief-hover-preview strong, .debrief-hover-preview span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.debrief-hover-preview strong { font-size: 10px; }
-.debrief-hover-preview span { color: #aab1b9; font-size: 8px; }
 .debrief-creative > div > div { min-width: 0; }
 .debrief-creative strong { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
 .debrief-table .debrief-creative small { overflow: hidden; text-overflow: ellipsis; }
@@ -387,7 +381,6 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
 .media-mode .active { background: white; color: #20262d; }
 .detail-media { min-height: 560px; display: grid; place-items: center; }
 .detail-media .media-frame { width: min(100%, 430px); height: 560px; aspect-ratio: auto; border: 1px solid #d8dce1; border-radius: 8px; background: white; }
-.preview-loading { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(17,19,21,.35); }
 .detail-media img, .detail-media iframe, .detail-media > video { width: 100%; height: 100%; object-fit: contain; border: 0; }
 .detail-media > video { max-width: 430px; max-height: 560px; background: #070809; }
 .variant-strip { display: flex; justify-content: center; gap: 7px; overflow-x: auto; padding: 10px 0 3px; }
