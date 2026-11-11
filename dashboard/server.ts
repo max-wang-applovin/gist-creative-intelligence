@@ -23,6 +23,7 @@ import {
   fetchMetaVideoMetrics,
   type MetaAdVideoMetrics,
 } from "../bot/lib/meta-video.js";
+import { normalizeCreativeName } from "../bot/lib/names.js";
 import {
   analyzeCreative,
   creativeFingerprint,
@@ -875,6 +876,124 @@ async function buildSlicePayload(
   return value;
 }
 
+async function buildDebriefVisualLearnings(
+  debrief: Awaited<ReturnType<typeof buildDebriefPayload>>,
+): Promise<{
+  coverage: { scanned: number; total: number };
+  winningPatterns: Array<{
+    dimension: string;
+    value: string;
+    creatives: number;
+    testingSpend: number;
+  }>;
+  losingPatterns: Array<{
+    dimension: string;
+    value: string;
+    creatives: number;
+    testingSpend: number;
+  }>;
+  strengths: string[];
+  risks: string[];
+}> {
+  const analyses = new Map(
+    (await analysisStore.list()).map((analysis) => [
+      analysis.creativeId,
+      analysis,
+    ]),
+  );
+  type Bucket = {
+    dimension: string;
+    value: string;
+    winnerCount: number;
+    loserCount: number;
+    winnerSpend: number;
+    loserSpend: number;
+  };
+  const buckets = new Map<string, Bucket>();
+  const strengths: string[] = [];
+  const risks: string[] = [];
+  let scanned = 0;
+  for (const creative of debrief.all) {
+    const analysis = analyses.get(normalizeCreativeName(creative.name));
+    if (!analysis) continue;
+    scanned += 1;
+    if (creative.verdict === "Winner" && analysis.strengths[0]) {
+      strengths.push(analysis.strengths[0]);
+    }
+    if (creative.verdict === "Loser" && analysis.risks[0]) {
+      risks.push(analysis.risks[0]);
+    }
+    if (creative.verdict !== "Winner" && creative.verdict !== "Loser") {
+      continue;
+    }
+    const dimensions = [
+      ["Theme", analysis.taxonomy.theme],
+      ["Angle", analysis.taxonomy.angle],
+      ["Format", analysis.taxonomy.format],
+      ["Hook", analysis.taxonomy.hookType],
+      ["Presenter", analysis.taxonomy.presenter],
+      ["Color harmony", analysis.colorTheory.harmony],
+      ["Palette", analysis.colorTheory.paletteTemperature],
+    ];
+    for (const [dimension, value] of dimensions) {
+      if (!value) continue;
+      const key = `${dimension}:${value}`;
+      const bucket = buckets.get(key) ?? {
+        dimension,
+        value,
+        winnerCount: 0,
+        loserCount: 0,
+        winnerSpend: 0,
+        loserSpend: 0,
+      };
+      if (creative.verdict === "Winner") {
+        bucket.winnerCount += 1;
+        bucket.winnerSpend += creative.testing.spend;
+      } else {
+        bucket.loserCount += 1;
+        bucket.loserSpend += creative.testing.spend;
+      }
+      buckets.set(key, bucket);
+    }
+  }
+  const unique = (values: string[]) => [...new Set(values)].slice(0, 6);
+  const winningPatterns = [...buckets.values()]
+    .filter((bucket) => bucket.winnerCount > bucket.loserCount)
+    .sort(
+      (a, b) =>
+        b.winnerCount - b.loserCount - (a.winnerCount - a.loserCount) ||
+        b.winnerSpend - a.winnerSpend,
+    )
+    .slice(0, 8)
+    .map((bucket) => ({
+      dimension: bucket.dimension,
+      value: bucket.value,
+      creatives: bucket.winnerCount,
+      testingSpend: Math.round(bucket.winnerSpend * 100) / 100,
+    }));
+  const losingPatterns = [...buckets.values()]
+    .filter((bucket) => bucket.loserCount > bucket.winnerCount)
+    .sort(
+      (a, b) =>
+        b.loserCount - b.winnerCount - (a.loserCount - a.winnerCount) ||
+        b.loserSpend - a.loserSpend,
+    )
+    .slice(0, 8)
+    .map((bucket) => ({
+      dimension: bucket.dimension,
+      value: bucket.value,
+      creatives: bucket.loserCount,
+      testingSpend: Math.round(bucket.loserSpend * 100) / 100,
+    }));
+  return {
+    coverage: { scanned, total: debrief.all.length },
+    winningPatterns,
+    losingPatterns,
+    strengths: unique(strengths),
+    risks: unique(risks),
+  };
+}
+
 const staticFiles: Record<string, { file: string; type: string }> = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/index.html": { file: "index.html", type: "text/html; charset=utf-8" },
@@ -1007,11 +1126,14 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
         url.searchParams.get("since"),
         url.searchParams.get("until"),
       );
-      json(
-        res,
-        200,
-        await buildDebriefPayload(range, url.searchParams.get("refresh") === "1"),
+      const debrief = await buildDebriefPayload(
+        range,
+        url.searchParams.get("refresh") === "1",
       );
+      json(res, 200, {
+        ...debrief,
+        visualLearnings: await buildDebriefVisualLearnings(debrief),
+      });
     } catch (error) {
       json(res, 400, {
         error: error instanceof Error ? error.message : String(error),

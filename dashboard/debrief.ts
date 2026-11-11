@@ -11,7 +11,7 @@ import { join, resolve } from "node:path";
 import { defaultDateRange } from "../bot/lib/dates.js";
 import { normalizeCreativeName } from "../bot/lib/names.js";
 
-export const DEFAULT_DEBRIEF_SINCE = "2026-09-15";
+export const DEFAULT_DEBRIEF_DAYS = 14 * 7;
 const MAX_DEBRIEF_DAYS = 180;
 const CACHE_TTL_MS = 30 * 60_000;
 const META_INVENTORY_TTL_MS = 6 * 60 * 60_000;
@@ -870,9 +870,10 @@ export function resolveDebriefRange(
   sinceParam: string | null,
   untilParam: string | null,
 ): { since: string; until: string } {
-  const yesterday = defaultDateRange(1).until;
-  const since = parseDay(sinceParam, "since") ?? DEFAULT_DEBRIEF_SINCE;
-  const until = parseDay(untilParam, "until") ?? yesterday;
+  const fallback = defaultDateRange(DEFAULT_DEBRIEF_DAYS);
+  const yesterday = fallback.until;
+  const since = parseDay(sinceParam, "since") ?? fallback.since;
+  const until = parseDay(untilParam, "until") ?? fallback.until;
   if (until > yesterday) throw new Error(`until must be ${yesterday} or earlier.`);
   if (since > until) throw new Error("since must be on or before until.");
   const days =

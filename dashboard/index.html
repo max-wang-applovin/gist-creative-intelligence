@@ -238,9 +238,22 @@
               <p id="debriefStatus">Open this tab to load test results.</p>
             </div>
             <div class="scan-controls debrief-controls">
+              <label>
+                <span>Test window</span>
+                <select id="debriefWindowPreset">
+                  <option value="28">Last 4 weeks</option>
+                  <option value="56">Last 8 weeks</option>
+                  <option value="98" selected>Last 14 weeks</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
               <label class="debrief-since">
-                <span>Tested since</span>
-                <input id="debriefSince" type="date" value="2026-09-15" />
+                <span>From</span>
+                <input id="debriefSince" type="date" />
+              </label>
+              <label class="debrief-since">
+                <span>To</span>
+                <input id="debriefUntil" type="date" />
               </label>
               <button id="applyDebrief" class="analysis-secondary">Apply</button>
               <button id="refreshDebrief" class="analysis-secondary">Refresh</button>
@@ -255,47 +268,57 @@
               <p id="debriefHeadline" class="debrief-headline"></p>
               <div id="debriefSummary" class="debrief-summary-bar"></div>
               <nav class="debrief-section-nav" aria-label="Test debrief sections">
-                <button class="active" data-debrief-section="decisions">Decisions</button>
+                <button class="active" data-debrief-section="decisions">Tested creatives</button>
                 <button data-debrief-section="learnings">Learnings</button>
-                <button data-debrief-section="scaled">Scaled validation</button>
+                <button data-debrief-section="scaled">Scale candidates</button>
                 <button data-debrief-section="benchmarks">Benchmarks</button>
-                <button data-debrief-section="all">All creatives</button>
+                <button data-debrief-section="all">All data</button>
               </nav>
             </div>
             <section id="debriefSectionDecisions" class="analysis-card debrief-card" data-debrief-section-panel="decisions">
               <div class="debrief-section-heading">
                 <div>
-                  <div class="analysis-card-title">Decision queue · recommended next action</div>
-                  <p class="debrief-rule">Grouped by Testing ad group (concept). Expand a group to review its creative variants and testing-only recommendations.</p>
+                  <div class="analysis-card-title">Creatives tested in this period</div>
+                  <p class="debrief-rule">Every creative launched in the selected window with verdict, testing spend, sign-ups and mature D1/D3/D7.</p>
                 </div>
-                <label><span>Action</span><select id="debriefActionFilter">
-                  <option value="all">All actions</option>
-                  <option value="Scale">Scale</option>
-                  <option value="Pause">Pause</option>
-                  <option value="Iterate">Iterate</option>
-                  <option value="Wait">Wait</option>
-                </select></label>
+                <div class="debrief-inline-controls">
+                  <label><span>Verdict</span><select id="debriefTestedVerdict">
+                    <option value="all">All verdicts</option>
+                    <option value="Winner">Winners</option>
+                    <option value="Loser">Losers</option>
+                    <option value="Middle">Middle</option>
+                    <option value="Learning">Learning</option>
+                  </select></label>
+                  <label><span>Sort by</span><select id="debriefTestedSort">
+                    <option value="newest">Newest launch</option>
+                    <option value="spendDesc">Testing spend · high to low</option>
+                    <option value="spendAsc">Testing spend · low to high</option>
+                    <option value="signupsDesc">Sign-ups · high to low</option>
+                    <option value="signupsAsc">Sign-ups · low to high</option>
+                    <option value="cpsuAsc">CPSU · low to high</option>
+                    <option value="cpsuDesc">CPSU · high to low</option>
+                    <option value="d1Desc">D1 · high to low</option>
+                    <option value="d3Desc">D3 · high to low</option>
+                    <option value="d7Desc">D7 · high to low</option>
+                  </select></label>
+                </div>
               </div>
-              <div id="debriefDecisionSummary" class="debrief-action-summary"></div>
-              <div id="debriefDecisionQueue" class="data-table-wrap debrief-table-wrap debrief-decision-queue"></div>
+              <div id="debriefTestedCount" class="result-count debrief-tested-count">— creatives</div>
+              <div id="debriefTestedCreatives" class="data-table-wrap debrief-table-wrap debrief-decision-queue"></div>
+              <div class="debrief-pagination">
+                <button id="debriefTestedPreviousPage" class="analysis-secondary">Previous</button>
+                <span id="debriefTestedPageStatus">Page 1</span>
+                <button id="debriefTestedNextPage" class="analysis-secondary">Next</button>
+              </div>
             </section>
             <section id="debriefSectionLearnings" class="analysis-card debrief-card hidden" data-debrief-section-panel="learnings">
-              <div class="debrief-section-heading">
-                <div>
-                  <div id="debriefLearningsTitle" class="analysis-card-title">Top 10 winners</div>
-                  <p id="debriefLearningsRule" class="debrief-rule"></p>
-                </div>
-                <label><span>Outcome</span><select id="debriefLearningFilter">
-                  <option value="winners">Winners</option>
-                  <option value="losers">Losers</option>
-                  <option value="retentionRisks">Good sign-ups · weak retention</option>
-                </select></label>
-              </div>
-              <div id="debriefLearnings" class="data-table-wrap debrief-table-wrap"></div>
+              <div class="analysis-card-title">Broader creative learnings · visual QA</div>
+              <p id="debriefVisualCoverage" class="debrief-rule"></p>
+              <div id="debriefLearnings" class="debrief-learning-grid"></div>
             </section>
             <section id="debriefSectionScaled" class="analysis-card debrief-card hidden" data-debrief-section-panel="scaled">
-              <div class="analysis-card-title">Scaled validation · testing vs scaled</div>
-              <p class="debrief-rule">Post-promotion performance is shown separately and never changes the original testing verdict.</p>
+              <div class="analysis-card-title">Scale candidates · ready to push</div>
+              <p class="debrief-rule">Testing winners recommended to scale that have not received main-campaign spend yet.</p>
               <div id="debriefScaledValidation" class="data-table-wrap debrief-table-wrap"></div>
             </section>
             <section id="debriefSectionBenchmarks" class="analysis-card debrief-card hidden" data-debrief-section-panel="benchmarks">

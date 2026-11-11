@@ -307,6 +307,19 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-section-heading { display: flex; justify-content: space-between; align-items: end; gap: 14px; }
 .debrief-section-heading .analysis-card-title { margin-bottom: 12px; }
 .debrief-section-heading select { background: white; color: #222a32; border-color: #d9dee4; }
+.debrief-inline-controls { display: flex; align-items: end; gap: 8px; }
+.debrief-tested-count { justify-content: flex-end; margin-bottom: 7px; }
+.debrief-learning-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.debrief-learning-panel { min-width: 0; padding: 13px; border: 1px solid #e1e5ea; border-radius: 8px; background: #f7f9fb; }
+.debrief-learning-panel.positive { border-color: #cce9da; background: #f2fbf6; }
+.debrief-learning-panel.negative { border-color: #f1d4d4; background: #fff7f7; }
+.debrief-learning-panel h3 { margin: 0 0 10px; font-size: 11px; text-transform: uppercase; }
+.debrief-learning-panel ul { margin: 0; padding-left: 17px; color: #4e5964; font-size: 10px; line-height: 1.55; }
+.debrief-pattern-row { display: grid; grid-template-columns: 90px minmax(0,1fr); gap: 4px 8px; padding: 7px 0; border-top: 1px solid rgba(0,0,0,.06); }
+.debrief-pattern-row:first-of-type { border-top: 0; }
+.debrief-pattern-row > span { color: #75808b; font-size: 8px; text-transform: uppercase; }
+.debrief-pattern-row > strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.debrief-pattern-row > small { grid-column: 2; color: #7a8590; font-size: 8px; }
 .debrief-action-summary { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin: 10px 0 12px; }
 .debrief-action-card { display: flex; justify-content: space-between; align-items: center; border: 1px solid #dfe4ea; border-radius: 8px; padding: 10px 12px; background: #f6f8fa; color: #38434e; }
 .debrief-action-card span { font-size: 9px; font-weight: 800; text-transform: uppercase; }
@@ -489,6 +502,7 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .analysis-summary, .analysis-columns, .concept-dimensions, .recipe-grid, .inspiration-grid, .library-links { grid-template-columns: 1fr 1fr; }
   .debrief-action-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .debrief-summary-bar { grid-template-columns: repeat(4, minmax(80px,1fr)); }
+  .debrief-learning-grid { grid-template-columns: 1fr; }
   .freshness { display: none; }
 }
 @media (max-width: 560px) {
@@ -499,4 +513,5 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .analysis-summary, .analysis-columns, .concept-dimensions, .recipe-grid, .inspiration-grid, .library-links { grid-template-columns: 1fr; }
   .debrief-action-summary { grid-template-columns: 1fr; }
   .debrief-summary-bar { grid-template-columns: repeat(2, minmax(80px,1fr)); }
+  .debrief-inline-controls { align-items: stretch; flex-direction: column; }
 }

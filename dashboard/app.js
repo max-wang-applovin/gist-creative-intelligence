@@ -18,9 +18,9 @@ const state = {
   debriefHoverTimer: null,
   debriefHoverButton: null,
   debriefPreviewCache: new Map(),
-  expandedDecisionGroups: new Set(),
   debriefSection: "decisions",
   debriefPageNumber: 1,
+  debriefTestedPageNumber: 1,
   scanJob: null,
   analysisReport: "overview",
 };
@@ -2129,174 +2129,115 @@ function renderDebriefSegmentBenchmarks(rows) {
   </table>`;
 }
 
-function renderScaledValidation(rows) {
+function renderScaleCandidates(rows) {
   if (!rows.length) {
-    return '<div class="analysis-empty">No promoted creatives have comparable testing and scaled delivery yet.</div>';
+    return '<div class="analysis-empty">No testing winners are currently waiting to be pushed to a main campaign.</div>';
   }
-  return `<table class="analysis-data-table debrief-table scaled-validation-table">
-    <thead><tr><th class="sticky-cell">Creative</th><th>Testing spend</th><th>Scaled spend</th><th>Testing CPSU</th><th>Scaled CPSU</th><th>Testing D1</th><th>Scaled D1</th><th>Testing D3</th><th>Scaled D3</th><th>Testing D7</th><th>Scaled D7</th><th>Confidence</th></tr></thead>
+  return `<table class="analysis-data-table debrief-table scale-candidates-table">
+    <thead><tr><th class="sticky-cell">Creative</th><th>Source</th><th>Format</th><th>OS</th><th>Testing spend</th><th>Testing sign-ups</th><th>Testing CPSU</th><th>Testing D1</th><th>Testing D3</th><th>Testing D7</th><th>Confidence</th><th>Why ready</th></tr></thead>
     <tbody>${rows
       .map(
         (row) => `<tr>
           ${debriefCreativeCell(row)}
+          <td>${escapeHtml(row.source)}</td>
+          <td>${escapeHtml(row.format)}</td>
+          <td>${escapeHtml(row.os)}</td>
           <td>${money(row.testing.spend)}</td>
-          <td>${money(row.scaled.spend)}</td>
+          <td>${integer(row.testing.signups)}</td>
           <td>${debriefMoney(row.testing.cpsu)}</td>
-          <td>${debriefMoney(row.scaled.cpsu)}</td>
           <td>${debriefStageRetention(row, 1)}</td>
-          <td>${debriefStageRetention(row, 1, "scaled")}</td>
           <td>${debriefStageRetention(row, 3)}</td>
-          <td>${debriefStageRetention(row, 3, "scaled")}</td>
           <td>${debriefStageRetention(row, 7)}</td>
-          <td>${debriefStageRetention(row, 7, "scaled")}</td>
           <td>${debriefConfidenceChip(row.testing.confidence)}</td>
+          <td class="debrief-reasons">${escapeHtml(row.actionReason)}</td>
         </tr>`,
       )
       .join("")}</tbody>
   </table>`;
 }
 
-function clientDecisionGroups(rows) {
-  const groups = new Map();
-  for (const row of rows) {
-    const concept =
-      row.testingAdSets?.[0] || row.category || "Unassigned concept";
-    const group = groups.get(concept) || [];
-    group.push(row);
-    groups.set(concept, group);
-  }
-  return [...groups.entries()].map(([concept, creatives]) => {
-    const sum = (key) =>
-      creatives.reduce(
-        (total, row) => total + Number(row.testing?.[key] || 0),
-        0,
-      );
-    const cohortRate = (day) => {
-      const cohort = sum(`d${day}Cohort`);
-      return cohort > 0 ? (sum(`retainedD${day}`) / cohort) * 100 : null;
-    };
-    const d7Cohort = sum("d7Cohort");
-    const d3Cohort = sum("d3Cohort");
-    const d1Cohort = sum("d1Cohort");
-    const confidenceCohort = d7Cohort || d3Cohort || d1Cohort;
-    const confidence =
-      confidenceCohort >= 200
-        ? "High"
-        : confidenceCohort >= 50
-          ? "Medium"
-          : confidenceCohort >= 20
-            ? "Low"
-            : null;
-    const actionCounts = { Scale: 0, Pause: 0, Iterate: 0, Wait: 0 };
-    for (const row of creatives) actionCounts[row.recommendedAction] += 1;
-    const leadAction =
-      actionCounts.Scale > 0
-        ? "Scale"
-        : actionCounts.Iterate > 0
-          ? "Iterate"
-          : actionCounts.Pause > 0
-            ? "Pause"
-            : "Wait";
-    const testingSpend = sum("spend");
-    const testingSignups = sum("signups");
-    return {
-      concept,
-      creativeCount: creatives.length,
-      testingSpend,
-      testingSignups,
-      testingCpsu:
-        testingSignups > 0 ? testingSpend / testingSignups : null,
-      d1: cohortRate(1),
-      d3: cohortRate(3),
-      d7: cohortRate(7),
-      confidence,
-      leadAction,
-      actionCounts,
-      bestCreative: creatives[0]?.readableName || null,
-      creatives,
-    };
-  });
-}
-
-function renderDebriefDecisionQueue() {
+function renderDebriefTestedCreatives() {
   if (!state.debrief) return;
-  const selected = $("debriefActionFilter").value;
-  const all = state.debrief.decisions || [];
-  const groups = state.debrief.decisionGroups?.length
-    ? state.debrief.decisionGroups
-    : clientDecisionGroups(all);
-  const counts = Object.fromEntries(
-    ["Scale", "Pause", "Iterate", "Wait"].map((action) => [
-      action,
-      all.filter((row) => row.recommendedAction === action).length,
-    ]),
-  );
-  $("debriefDecisionSummary").innerHTML = ["Scale", "Pause", "Iterate", "Wait"]
-    .map(
-      (action) =>
-        `<button data-debrief-action="${action}" class="debrief-action-card action-${action.toLowerCase()}"><span>${action}</span><strong>${integer(counts[action])}</strong></button>`,
+  const verdict = $("debriefTestedVerdict").value;
+  const sort = $("debriefTestedSort").value;
+  const since = state.debrief.range.since;
+  const until = state.debrief.range.until;
+  const numeric = (value, fallback) =>
+    value == null ? fallback : Number(value);
+  const comparators = {
+    newest: (a, b) =>
+      (b.uploadedAt ?? "").localeCompare(a.uploadedAt ?? "") ||
+      b.testing.spend - a.testing.spend,
+    spendDesc: (a, b) => b.testing.spend - a.testing.spend,
+    spendAsc: (a, b) => a.testing.spend - b.testing.spend,
+    signupsDesc: (a, b) => b.testing.signups - a.testing.signups,
+    signupsAsc: (a, b) => a.testing.signups - b.testing.signups,
+    cpsuAsc: (a, b) =>
+      numeric(a.testing.cpsu, Infinity) -
+      numeric(b.testing.cpsu, Infinity),
+    cpsuDesc: (a, b) =>
+      numeric(b.testing.cpsu, -Infinity) -
+      numeric(a.testing.cpsu, -Infinity),
+    d1Desc: (a, b) =>
+      numeric(b.testing.d1, -Infinity) -
+      numeric(a.testing.d1, -Infinity),
+    d3Desc: (a, b) =>
+      numeric(b.testing.d3, -Infinity) -
+      numeric(a.testing.d3, -Infinity),
+    d7Desc: (a, b) =>
+      numeric(b.testing.d7, -Infinity) -
+      numeric(a.testing.d7, -Infinity),
+  };
+  const rows = [...state.debrief.all]
+    .filter(
+      (row) =>
+        row.uploadedDate &&
+        row.uploadedDate >= since &&
+        row.uploadedDate <= until &&
+        (verdict === "all" || row.verdict === verdict),
     )
-    .join("");
-  const visibleGroups =
-    selected === "all"
-      ? groups
-      : groups.filter((group) => group.actionCounts[selected] > 0);
-  const groupRows = visibleGroups
-    .map((group) => {
-      const expanded = state.expandedDecisionGroups.has(group.concept);
-      const actionMix = ["Scale", "Pause", "Iterate", "Wait"]
-        .filter((action) => group.actionCounts[action] > 0)
+    .sort(comparators[sort] || comparators.newest);
+  const pageSize = 25;
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  state.debriefTestedPageNumber = Math.min(
+    Math.max(1, state.debriefTestedPageNumber),
+    totalPages,
+  );
+  const start = (state.debriefTestedPageNumber - 1) * pageSize;
+  const pageRows = rows.slice(start, start + pageSize);
+  $("debriefTestedCount").textContent = rows.length
+    ? `${start + 1}–${Math.min(start + pageSize, rows.length)} of ${rows.length} launched`
+    : "No launched creatives";
+  $("debriefTestedPageStatus").textContent =
+    `Page ${state.debriefTestedPageNumber} of ${totalPages}`;
+  $("debriefTestedPreviousPage").disabled =
+    state.debriefTestedPageNumber <= 1;
+  $("debriefTestedNextPage").disabled =
+    state.debriefTestedPageNumber >= totalPages || rows.length === 0;
+  $("debriefTestedCreatives").innerHTML = pageRows.length
+    ? `<table class="analysis-data-table debrief-table tested-creatives-table">
+      <thead><tr><th class="sticky-cell">Creative</th><th>Verdict</th><th>Launched</th><th>Concept / ad group</th><th>Source</th><th>Format</th><th>OS</th><th>Testing spend</th><th>Sign-ups</th><th>CPSU</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
+      <tbody>${pageRows
         .map(
-          (action) =>
-            `<span class="debrief-action-pill action-${action.toLowerCase()}">${action} ${group.actionCounts[action]}</span>`,
+          (row) => `<tr>
+            ${debriefCreativeCell(row)}
+            <td>${debriefVerdictChip(row)}</td>
+            <td>${debriefShortDay(row.uploadedDate)}</td>
+            <td>${escapeHtml(row.testingAdSets?.[0] || row.category || "—")}</td>
+            <td>${escapeHtml(row.source)}</td>
+            <td>${escapeHtml(row.format)}</td>
+            <td>${escapeHtml(row.os)}</td>
+            <td>${money(row.testing.spend)}</td>
+            <td>${integer(row.testing.signups)}</td>
+            <td>${debriefMoney(row.testing.cpsu)}</td>
+            <td>${debriefStageRetention(row, 1)}</td>
+            <td>${debriefStageRetention(row, 3)}</td>
+            <td>${debriefStageRetention(row, 7)}</td>
+          </tr>`,
         )
-        .join(" ");
-      const childRows = expanded
-        ? group.creatives
-            .filter(
-              (row) =>
-                selected === "all" || row.recommendedAction === selected,
-            )
-            .map(
-              (row) => `<tr class="decision-creative-row">
-                <td></td>
-                ${debriefCreativeCell(row)}
-                <td></td>
-                <td><span class="debrief-action-pill action-${row.recommendedAction.toLowerCase()}">${escapeHtml(row.recommendedAction)}</span></td>
-                <td class="debrief-reasons">${escapeHtml(row.actionReason)}</td>
-                <td>${money(row.testing.spend)}</td>
-                <td>${integer(row.testing.signups)}</td>
-                <td>${debriefMoney(row.testing.cpsu)}</td>
-                <td>${debriefStageRetention(row, 1)}</td>
-                <td>${debriefStageRetention(row, 3)}</td>
-                <td>${debriefStageRetention(row, 7)}</td>
-                <td>${debriefConfidenceChip(row.retentionConfidence)}</td>
-              </tr>`,
-            )
-            .join("")
-        : "";
-      return `<tr class="decision-concept-row" data-debrief-concept="${escapeHtml(group.concept)}">
-          <td><button class="concept-toggle" aria-label="${expanded ? "Collapse" : "Expand"} ${escapeHtml(group.concept)}">${expanded ? "▾" : "▸"}</button></td>
-          <td class="sticky-cell"><strong>${escapeHtml(group.concept)}</strong><small>Best: ${escapeHtml(group.bestCreative || "—")}</small></td>
-          <td>${integer(group.creativeCount)}</td>
-          <td class="decision-action-mix">${actionMix}</td>
-          <td>${escapeHtml(group.leadAction)} variants</td>
-          <td>${money(group.testingSpend)}</td>
-          <td>${integer(group.testingSignups)}</td>
-          <td>${debriefMoney(group.testingCpsu)}</td>
-          <td>${debriefPct(group.d1)}</td>
-          <td>${debriefPct(group.d3)}</td>
-          <td>${debriefPct(group.d7)}</td>
-          <td>${debriefConfidenceChip(group.confidence)}</td>
-        </tr>${childRows}`;
-    })
-    .join("");
-  $("debriefDecisionQueue").innerHTML = visibleGroups.length
-    ? `<table class="analysis-data-table debrief-table decision-table">
-      <thead><tr><th></th><th class="sticky-cell">Concept / ad group</th><th>Creatives</th><th>Action mix</th><th>Lead signal</th><th>Testing spend</th><th>Sign-ups</th><th>CPSU</th><th>D1</th><th>D3</th><th>D7</th><th>Confidence</th></tr></thead>
-      <tbody>${groupRows}</tbody>
+        .join("")}</tbody>
     </table>`
-    : '<div class="analysis-empty">No creatives match this action.</div>';
+    : '<div class="analysis-empty">No creatives were launched in this period with the selected verdict.</div>';
 }
 
 function renderDebriefSources(sources) {
@@ -2820,39 +2761,47 @@ function renderDebriefAll() {
 
 function renderDebriefLearnings() {
   if (!state.debrief) return;
-  const view = $("debriefLearningFilter").value;
-  const views = {
-    winners: {
-      title: "Top 10 winners · lowest retention-adjusted cost",
-      rule: state.debrief.rules.winners,
-      rows: state.debrief.winners,
-      empty: "No creative has cleared the winner criteria yet.",
-      reasons: undefined,
-    },
-    losers: {
-      title: "Top 10 losers · highest retention-adjusted cost",
-      rule: state.debrief.rules.losers,
-      rows: state.debrief.losers,
-      empty: "No statistically eligible losers yet.",
-      reasons: undefined,
-    },
-    retentionRisks: {
-      title: "Good sign-ups · weak retention",
-      rule: state.debrief.rules.retentionRisks,
-      rows: state.debrief.retentionRisks,
-      empty:
-        "No creatives currently combine efficient sign-ups with below-typical mature retention.",
-      reasons: debriefRetentionRiskReasons,
-    },
-  };
-  const selected = views[view] || views.winners;
-  $("debriefLearningsTitle").textContent = selected.title;
-  $("debriefLearningsRule").textContent = selected.rule;
-  $("debriefLearnings").innerHTML = debriefRankedTable(
-    selected.rows,
-    selected.empty,
-    selected.reasons,
-  );
+  const visual = state.debrief.visualLearnings;
+  if (!visual?.coverage?.scanned) {
+    $("debriefVisualCoverage").textContent =
+      "No debrief creatives have visual-QA scans yet. Use Ad Analysis → Scan creatives to generate broader learnings.";
+    $("debriefLearnings").innerHTML =
+      '<div class="analysis-empty">Visual learnings will appear after creatives are scanned.</div>';
+    return;
+  }
+  $("debriefVisualCoverage").textContent =
+    `${integer(visual.coverage.scanned)} of ${integer(visual.coverage.total)} tested creatives have visual-QA coverage. Patterns compare scanned winners and losers.`;
+  const patternPanel = (title, patterns, tone) => `
+    <section class="debrief-learning-panel ${tone}">
+      <h3>${title}</h3>
+      ${
+        patterns.length
+          ? patterns
+              .map(
+                (pattern) => `<div class="debrief-pattern-row">
+                  <span>${escapeHtml(pattern.dimension)}</span>
+                  <strong>${escapeHtml(pattern.value)}</strong>
+                  <small>${integer(pattern.creatives)} creative${pattern.creatives === 1 ? "" : "s"} · ${money(pattern.testingSpend, true)} testing spend</small>
+                </div>`,
+              )
+              .join("")
+          : '<div class="analysis-empty">Not enough separated outcomes yet.</div>'
+      }
+    </section>`;
+  const notesPanel = (title, notes, tone) => `
+    <section class="debrief-learning-panel ${tone}">
+      <h3>${title}</h3>
+      ${
+        notes.length
+          ? `<ul>${notes.map((note) => `<li>${escapeHtml(note)}</li>`).join("")}</ul>`
+          : '<div class="analysis-empty">No repeated notes yet.</div>'
+      }
+    </section>`;
+  $("debriefLearnings").innerHTML =
+    patternPanel("Patterns among winners", visual.winningPatterns, "positive") +
+    patternPanel("Patterns among losers", visual.losingPatterns, "negative") +
+    notesPanel("Observed strengths", visual.strengths, "positive") +
+    notesPanel("Observed risks", visual.risks, "negative");
 }
 
 function setDebriefSection(section) {
@@ -2871,7 +2820,7 @@ function setDebriefSection(section) {
         panel.dataset.debriefSectionPanel !== section,
       );
     });
-  if (section === "decisions") renderDebriefDecisionQueue();
+  if (section === "decisions") renderDebriefTestedCreatives();
   else if (section === "learnings") renderDebriefLearnings();
   else if (section === "all") renderDebriefAll();
 }
@@ -2898,13 +2847,17 @@ function renderDebrief() {
     <div><span>Testing CPSU</span><strong>${debriefMoney(s.cpsu)}</strong></div>
     <div><span>D7 benchmark</span><strong>${debriefPct(data.benchmarks?.average?.d7)}</strong></div>`;
   $("debriefBenchmarks").innerHTML = renderDebriefBenchmarks(data.benchmarks);
-  renderDebriefDecisionQueue();
+  renderDebriefTestedCreatives();
   $("debriefSegmentBenchmarks").innerHTML =
     renderDebriefSegmentBenchmarks(data.segmentBenchmarks);
   $("debriefSources").innerHTML = renderDebriefSources(data.bySource);
   renderDebriefLearnings();
   $("debriefScaledValidation").innerHTML =
-    renderScaledValidation(data.scaledValidation);
+    renderScaleCandidates(
+      (data.decisions || []).filter(
+        (row) => row.recommendedAction === "Scale" && !row.promoted,
+      ),
+    );
   $("debriefRules").innerHTML = Object.values(data.rules)
     .map((rule) => `<li>${escapeHtml(rule)}</li>`)
     .join("");
@@ -2937,7 +2890,9 @@ function scheduleDebriefPoll(previousGeneratedAt, attempt = 0) {
     try {
       const params = new URLSearchParams();
       const since = $("debriefSince").value;
+      const until = $("debriefUntil").value;
       if (since) params.set("since", since);
+      if (until) params.set("until", until);
       const response = await fetch(`/api/debrief?${params}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Refresh unavailable");
@@ -2958,7 +2913,12 @@ function scheduleDebriefPoll(previousGeneratedAt, attempt = 0) {
 async function loadDebrief(force = false) {
   if (state.debriefLoading) return;
   const since = $("debriefSince").value;
-  if (!force && state.debrief?.range.since === since) {
+  const until = $("debriefUntil").value;
+  if (
+    !force &&
+    state.debrief?.range.since === since &&
+    state.debrief?.range.until === until
+  ) {
     renderDebrief();
     return;
   }
@@ -2971,6 +2931,7 @@ async function loadDebrief(force = false) {
   try {
     const params = new URLSearchParams();
     if (since) params.set("since", since);
+    if (until) params.set("until", until);
     if (force) params.set("refresh", "1");
     const response = await fetch(`/api/debrief?${params}`);
     const data = await response.json();
@@ -2990,6 +2951,18 @@ async function loadDebrief(force = false) {
     $("applyDebrief").disabled = false;
     $("refreshDebrief").disabled = false;
   }
+}
+
+function applyDebriefWindowPreset() {
+  const days = Number($("debriefWindowPreset").value);
+  if (!Number.isInteger(days)) return;
+  const until = new Date();
+  until.setUTCHours(0, 0, 0, 0);
+  until.setUTCDate(until.getUTCDate() - 1);
+  const since = new Date(until);
+  since.setUTCDate(since.getUTCDate() - (days - 1));
+  $("debriefSince").value = since.toISOString().slice(0, 10);
+  $("debriefUntil").value = until.toISOString().slice(0, 10);
 }
 
 function switchPage(page) {
@@ -3121,25 +3094,18 @@ $("refreshCompetitors").addEventListener("click", () =>
 );
 $("applyDebrief").addEventListener("click", () => void loadDebrief());
 $("refreshDebrief").addEventListener("click", () => void loadDebrief(true));
+$("debriefWindowPreset").addEventListener("change", () => {
+  if ($("debriefWindowPreset").value !== "custom") {
+    applyDebriefWindowPreset();
+    void loadDebrief();
+  }
+});
+["debriefSince", "debriefUntil"].forEach((id) => {
+  $(id).addEventListener("change", () => {
+    $("debriefWindowPreset").value = "custom";
+  });
+});
 $("debriefPage").addEventListener("click", (event) => {
-  const action = event.target.closest("[data-debrief-action]")?.dataset
-    .debriefAction;
-  if (action) {
-    $("debriefActionFilter").value = action;
-    renderDebriefDecisionQueue();
-    return;
-  }
-  const concept = event.target.closest("[data-debrief-concept]")?.dataset
-    .debriefConcept;
-  if (concept) {
-    if (state.expandedDecisionGroups.has(concept)) {
-      state.expandedDecisionGroups.delete(concept);
-    } else {
-      state.expandedDecisionGroups.add(concept);
-    }
-    renderDebriefDecisionQueue();
-    return;
-  }
   const button = event.target.closest("[data-debrief-preview]");
   if (button) void openDebriefDetail(button);
 });
@@ -3155,18 +3121,24 @@ $("debriefPage").addEventListener("pointerout", (event) => {
     hideDebriefHoverPreview();
   }
 });
-$("debriefActionFilter").addEventListener(
-  "change",
-  renderDebriefDecisionQueue,
-);
-$("debriefLearningFilter").addEventListener(
-  "change",
-  renderDebriefLearnings,
-);
 document.querySelectorAll("[data-debrief-section]").forEach((button) => {
   button.addEventListener("click", () =>
     setDebriefSection(button.dataset.debriefSection),
   );
+});
+["debriefTestedVerdict", "debriefTestedSort"].forEach((id) => {
+  $(id).addEventListener("change", () => {
+    state.debriefTestedPageNumber = 1;
+    renderDebriefTestedCreatives();
+  });
+});
+$("debriefTestedPreviousPage").addEventListener("click", () => {
+  state.debriefTestedPageNumber -= 1;
+  renderDebriefTestedCreatives();
+});
+$("debriefTestedNextPage").addEventListener("click", () => {
+  state.debriefTestedPageNumber += 1;
+  renderDebriefTestedCreatives();
 });
 [
   "debriefSourceFilter",
@@ -3199,6 +3171,7 @@ $("debriefNextPage").addEventListener("click", () => {
 const initialPage = new URLSearchParams(window.location.search).get("page");
 const initialReport = new URLSearchParams(window.location.search).get("report");
 const initialDays = new URLSearchParams(window.location.search).get("days");
+applyDebriefWindowPreset();
 if (
   initialDays &&
   [...$("datePreset").options].some((option) => option.value === initialDays)
