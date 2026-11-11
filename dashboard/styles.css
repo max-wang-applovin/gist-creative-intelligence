@@ -305,13 +305,17 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-table .debrief-creative { min-width: 260px; max-width: 340px; }
 .debrief-creative > div { display: flex; gap: 9px; align-items: center; }
 .debrief-creative img, .debrief-thumb-empty { flex: 0 0 auto; width: 40px; height: 50px; border-radius: 5px; object-fit: cover; background: #eef1f4; }
+.debrief-preview-button { flex: 0 0 auto; width: 40px; height: 50px; overflow: hidden; border: 0; border-radius: 5px; padding: 0; background: #eef1f4; }
+.debrief-preview-button img { width: 100%; height: 100%; transition: transform .15s ease; }
+.debrief-preview-button:hover img { transform: scale(1.05); }
 .debrief-creative > div > div { min-width: 0; }
 .debrief-creative strong { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
 .debrief-table .debrief-creative small { overflow: hidden; text-overflow: ellipsis; }
 .debrief-chips { display: flex; gap: 4px; margin-top: 4px; }
 .debrief-chip { display: inline-block; border-radius: 999px; padding: 2px 7px; font-size: 9px; font-weight: 700; background: #eef1f4; color: #55606b; }
 .debrief-chip.live, .debrief-chip.verdict-winner { background: #e3f6ec; color: #18724f; }
-.debrief-chip.promoted { background: #e5edfb; color: #185ecb; }
+.debrief-chip.testing { background: #f4edff; color: #7448a8; }
+.debrief-chip.scaled { background: #e5edfb; color: #185ecb; }
 .debrief-chip.carryover, .debrief-chip.verdict-learning { background: #fdf1de; color: #9a5d0c; }
 .debrief-chip.verdict-loser { background: #fde8e8; color: #b23a3a; }
 .debrief-reasons { min-width: 260px; text-align: left !important; white-space: normal; line-height: 1.45; color: #37424d; }
@@ -326,6 +330,11 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-filters .result-count { color: #68727d; }
 .debrief-rules summary { cursor: pointer; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
 .debrief-rules ul { margin: 10px 0 0; padding-left: 18px; color: #4d5864; font-size: 11px; line-height: 1.6; }
+.debrief-preview-shell { height: 100%; display: grid; grid-template-rows: 52px minmax(0,1fr); }
+.debrief-preview-media { min-height: 0; display: grid; place-items: center; padding: 18px; background: #111315; }
+.debrief-preview-media iframe { width: min(100%, 520px); height: 100%; border: 0; border-radius: 9px; background: white; }
+.debrief-preview-media img { max-width: min(100%, 520px); max-height: calc(100% - 36px); object-fit: contain; border-radius: 9px; }
+.debrief-preview-media p { margin: 8px 0 0; color: #b7bec6; font-size: 11px; }
 
 .loading-state { min-height: 350px; display: grid; place-items: center; align-content: center; color: var(--muted); gap: 12px; }
 .spinner { width: 30px; height: 30px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }

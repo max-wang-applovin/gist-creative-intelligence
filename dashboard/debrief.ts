@@ -53,6 +53,7 @@ export type DebriefCreative = {
   promoted: boolean;
   spend: number;
   testingSpend: number;
+  scaledSpend: number;
   impressions: number;
   clicks: number;
   ctr: number;
@@ -73,6 +74,9 @@ export type DebriefCreative = {
   retentionHorizon: "D1" | "D3" | "D7" | null;
   retentionCost: number | null;
   retentionCostIndex: number | null;
+  retainedD1: number;
+  retainedD3: number;
+  retainedD7: number;
   d1Cohort: number;
   d3Cohort: number;
   d7Cohort: number;
@@ -94,11 +98,22 @@ type CreativeRef = {
   spend: number;
 };
 
+type DebriefBenchmark = {
+  label: string;
+  creativeName: string | null;
+  count: number;
+  cpsu: number | null;
+  d1: number | null;
+  d3: number | null;
+  d7: number | null;
+};
+
 export type DebriefSourceSummary = {
   source: DebriefSource;
   tested: number;
   spend: number;
   testingSpend: number;
+  scaledSpend: number;
   signups: number;
   cpsu: number | null;
   winners: number;
@@ -125,6 +140,7 @@ export type DebriefPayload = {
     carryover: number;
     spend: number;
     testingSpend: number;
+    scaledSpend: number;
     signups: number;
     cpsu: number | null;
     since: string;
@@ -153,6 +169,10 @@ export type DebriefPayload = {
     cpsu: number | null;
   };
   bySource: DebriefSourceSummary[];
+  benchmarks: {
+    average: DebriefBenchmark;
+    best: DebriefBenchmark | null;
+  };
   winners: DebriefCreative[];
   losers: DebriefCreative[];
   retentionRisks: DebriefCreative[];
@@ -824,6 +844,7 @@ async function buildDebrief(range: {
       promoted: acc.mainSpend > 0,
       spend,
       testingSpend: round2(acc.testingSpend),
+      scaledSpend: round2(acc.mainSpend),
       impressions: acc.impressions,
       clicks: acc.clicks,
       ctr: pctOf(acc.clicks, acc.impressions) ?? 0,
@@ -847,6 +868,9 @@ async function buildDebrief(range: {
       retentionHorizon,
       retentionCost: retentionCost === null ? null : round2(retentionCost),
       retentionCostIndex: null,
+      retainedD1: acc.retainedD1,
+      retainedD3: acc.retainedD3,
+      retainedD7: acc.retainedD7,
       d1Cohort: acc.cohortD1,
       d3Cohort: acc.cohortD3,
       d7Cohort: acc.cohortD7,
@@ -991,6 +1015,30 @@ async function buildDebrief(range: {
     })
     .slice(0, LIST_SIZE);
 
+  const total = (key: keyof DebriefCreative) =>
+    ranked.reduce((sum, creative) => sum + Number(creative[key] || 0), 0);
+  const benchmarkAverage: DebriefBenchmark = {
+    label: "Eligible weighted average",
+    creativeName: null,
+    count: ranked.length,
+    cpsu: ratio(total("spend"), total("signups")),
+    d1: pctOf(total("retainedD1"), total("d1Cohort")),
+    d3: pctOf(total("retainedD3"), total("d3Cohort")),
+    d7: pctOf(total("retainedD7"), total("d7Cohort")),
+  };
+  const best = winners[0];
+  const benchmarkBest: DebriefBenchmark | null = best
+    ? {
+        label: "Best retention-adjusted winner",
+        creativeName: best.readableName,
+        count: 1,
+        cpsu: best.cpsu,
+        d1: best.d1,
+        d3: best.d3,
+        d7: best.d7,
+      }
+    : null;
+
   const all = [...tested].sort(
     (a, b) =>
       (b.uploadedAt ?? "").localeCompare(a.uploadedAt ?? "") ||
@@ -1021,6 +1069,7 @@ async function buildDebrief(range: {
         tested: list.length,
         spend: round2(spend),
         testingSpend: round2(list.reduce((sum, c) => sum + c.testingSpend, 0)),
+        scaledSpend: round2(list.reduce((sum, c) => sum + c.scaledSpend, 0)),
         signups,
         cpsu: signups > 0 ? round2(spend / signups) : null,
         winners: list.filter((c) => c.verdict === "Winner").length,
@@ -1054,6 +1103,7 @@ async function buildDebrief(range: {
       carryover: tested.filter((c) => c.carryover).length,
       spend: round2(totalSpend),
       testingSpend: round2(tested.reduce((sum, c) => sum + c.testingSpend, 0)),
+      scaledSpend: round2(tested.reduce((sum, c) => sum + c.scaledSpend, 0)),
       signups: totalSignups,
       cpsu: totalSignups > 0 ? round2(totalSpend / totalSignups) : null,
       since: range.since,
@@ -1065,12 +1115,16 @@ async function buildDebrief(range: {
       eligible: `Decided once total spend ≥ $${DECISION_SPEND}, or ≥ ${DECISION_DAYS} days since upload with ≥ $${DECISION_MIN_SPEND_AT_DAYS} spend. Ranking also requires a mature retention cohort with ≥ ${MIN_RETENTION_COHORT} installs; everything else is still learning.`,
       winners: `${LIST_SIZE} lowest cost per retained user among decided creatives uploaded in the window with ≥ ${WINNER_MIN_SIGNUPS} sign-ups. Uses D7 when mature, otherwise D3 then D1, normalized against the typical cost at that horizon.`,
       losers: `${LIST_SIZE} highest retention-adjusted costs among the other decided creatives uploaded in the window; mature cohorts with zero retained users rank worst. Older creatives are listed but not ranked.`,
-      promoted: "Also spent in a main “Leads_CBO on” campaign.",
+      promoted: "Scaled = also spent in a main “Leads_CBO on” campaign; Testing only = no main-campaign spend.",
       retention: `D1/D3/D7 = retained users / installs from fully matured Adjust cohorts. Cost per retained user uses spend from those same mature cohorts, avoiding immature-spend bias.`,
       retentionRisks: `Good sign-ups, weak retention = ≥ ${WINNER_MIN_SIGNUPS} sign-ups and cost per sign-up at or below typical, but retention below typical at the most mature available horizon.`,
     },
     typical,
     bySource,
+    benchmarks: {
+      average: benchmarkAverage,
+      best: benchmarkBest,
+    },
     winners,
     losers,
     retentionRisks,

@@ -1952,8 +1952,9 @@ const debriefRetentionCost = (row, day) =>
 function debriefChips(row) {
   const chips = [
     `<span class="debrief-chip ${row.status === "Live" ? "live" : "paused"}">${row.status}</span>`,
+    '<span class="debrief-chip testing">Testing</span>',
   ];
-  if (row.promoted) chips.push('<span class="debrief-chip promoted">Promoted</span>');
+  if (row.promoted) chips.push('<span class="debrief-chip scaled">Scaled</span>');
   if (row.carryover) {
     chips.push(
       `<span class="debrief-chip carryover" title="Uploaded ${escapeHtml(row.uploadedDate)}, before this window">Pre-window</span>`,
@@ -1968,9 +1969,16 @@ function debriefVerdictChip(row) {
 
 function debriefCreativeCell(row) {
   const thumb = safeUrl(row.thumbnailUrl);
+  const adId = row.adIds?.[0];
+  const preview =
+    thumb && adId
+      ? `<button class="debrief-preview-button" data-debrief-preview="${escapeHtml(adId)}" data-debrief-name="${escapeHtml(row.readableName)}" data-debrief-thumbnail="${escapeHtml(thumb)}" aria-label="Open preview for ${escapeHtml(row.readableName)}"><img loading="lazy" src="${escapeHtml(thumb)}" alt="" /></button>`
+      : thumb
+        ? `<img loading="lazy" src="${escapeHtml(thumb)}" alt="" />`
+        : '<span class="debrief-thumb-empty"></span>';
   return `<td class="sticky-cell debrief-creative">
     <div>
-      ${thumb ? `<img loading="lazy" src="${escapeHtml(thumb)}" alt="" />` : '<span class="debrief-thumb-empty"></span>'}
+      ${preview}
       <div>
         <strong title="${escapeHtml(row.name)}">${escapeHtml(row.readableName)}</strong>
         <small title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</small>
@@ -1980,12 +1988,10 @@ function debriefCreativeCell(row) {
   </td>`;
 }
 
-function debriefSpendCell(row) {
-  const extra =
-    row.spend - row.testingSpend >= 1
-      ? `<small>${money(row.testingSpend, true)} in testing</small>`
-      : "";
-  return `<td>${money(row.spend)}${extra}</td>`;
+function debriefSpendCells(row) {
+  return `<td>${money(row.spend)}</td>
+    <td>${money(row.testingSpend)}</td>
+    <td>${row.scaledSpend > 0 ? money(row.scaledSpend) : "—"}</td>`;
 }
 
 function debriefRankedTable(
@@ -2001,8 +2007,11 @@ function debriefRankedTable(
     "Source",
     "Format",
     "OS",
+    "Stage",
     "Uploaded",
-    "Spend",
+    "Total spend",
+    "Testing spend",
+    "Scaled spend",
     "Sign-ups",
     "Cost / sign-up",
     "D1",
@@ -2023,8 +2032,9 @@ function debriefRankedTable(
         <td>${escapeHtml(row.source)}</td>
         <td>${escapeHtml(row.format)}</td>
         <td>${escapeHtml(row.os)}</td>
+        <td>${row.promoted ? "Testing + scaled" : "Testing only"}</td>
         <td title="${escapeHtml(row.uploadedAt || "")}">${debriefShortDay(row.uploadedDate)}</td>
-        ${debriefSpendCell(row)}
+        ${debriefSpendCells(row)}
         <td>${integer(row.signups)}</td>
         <td><strong>${debriefMoney(row.cpsu)}</strong></td>
         <td>${debriefPct(row.d1)}</td>
@@ -2061,18 +2071,39 @@ function debriefRetentionRiskReasons(row) {
   ];
 }
 
+function renderDebriefBenchmarks(benchmarks) {
+  const rows = [benchmarks.average, benchmarks.best].filter(Boolean);
+  return `<table class="analysis-data-table debrief-table benchmark-table">
+    <thead><tr><th class="sticky-cell">Benchmark</th><th>Creative</th><th>Creatives</th><th>Cost / sign-up</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
+    <tbody>${rows
+      .map(
+        (row) => `<tr>
+          <td class="sticky-cell"><strong>${escapeHtml(row.label)}</strong></td>
+          <td>${escapeHtml(row.creativeName || "All eligible creatives")}</td>
+          <td>${integer(row.count)}</td>
+          <td><strong>${debriefMoney(row.cpsu)}</strong></td>
+          <td>${debriefPct(row.d1)}</td>
+          <td>${debriefPct(row.d3)}</td>
+          <td>${debriefPct(row.d7)}</td>
+        </tr>`,
+      )
+      .join("")}</tbody>
+  </table>`;
+}
+
 function renderDebriefSources(sources) {
   const headers = [
     "Source",
     "Tested",
     "Spend",
     "Testing spend",
+    "Scaled spend",
     "Sign-ups",
     "Cost / sign-up",
     "Winners",
     "Losers",
     "Learning",
-    "Promoted",
+    "Scaled",
     "Best",
     "Worst",
   ];
@@ -2085,6 +2116,7 @@ function renderDebriefSources(sources) {
         <td>${integer(row.tested)}</td>
         <td>${money(row.spend, true)}</td>
         <td>${money(row.testingSpend, true)}</td>
+        <td>${row.scaledSpend > 0 ? money(row.scaledSpend, true) : "—"}</td>
         <td>${integer(row.signups)}</td>
         <td><strong>${debriefMoney(row.cpsu)}</strong></td>
         <td>${integer(row.winners)}</td>
@@ -2098,18 +2130,54 @@ function renderDebriefSources(sources) {
     .join("")}</tbody></table>`;
 }
 
+async function openDebriefPreview(button) {
+  const adId = button.dataset.debriefPreview;
+  const name = button.dataset.debriefName || "Creative preview";
+  const thumbnail = safeUrl(button.dataset.debriefThumbnail);
+  if (!adId) return;
+  state.detail = null;
+  $("dialogContent").dataset.previewAdId = adId;
+  $("dialogContent").innerHTML = `
+    <div class="debrief-preview-shell">
+      <header class="detail-header">
+        <strong>${escapeHtml(name)}</strong>
+        <div><span>Meta ad preview</span></div>
+      </header>
+      <div id="debriefPreviewMedia" class="debrief-preview-media"><div class="spinner"></div></div>
+    </div>`;
+  if (!dialog.open) dialog.showModal();
+  try {
+    const response = await fetch(`/api/preview?adId=${encodeURIComponent(adId)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Preview unavailable");
+    const src = safeUrl(data.src);
+    if (!src) throw new Error("Unsafe preview URL");
+    if ($("dialogContent").dataset.previewAdId !== adId) return;
+    $("debriefPreviewMedia").innerHTML =
+      `<iframe src="${escapeHtml(src)}" allow="autoplay; fullscreen" title="${escapeHtml(name)}"></iframe>`;
+  } catch (error) {
+    if ($("dialogContent").dataset.previewAdId !== adId) return;
+    $("debriefPreviewMedia").innerHTML = thumbnail
+      ? `<img src="${escapeHtml(thumbnail)}" alt="${escapeHtml(name)}" /><p>${escapeHtml(error.message)}</p>`
+      : `<div class="media-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+
 function filteredDebriefRows() {
   const rows = state.debrief?.all ?? [];
   const query = $("debriefSearch").value.trim().toLowerCase();
   const source = $("debriefSourceFilter").value;
   const format = $("debriefFormatFilter").value;
   const os = $("debriefOsFilter").value;
+  const stage = $("debriefStageFilter").value;
   const verdict = $("debriefVerdictFilter").value;
   const upload = $("debriefUploadFilter").value;
-  return rows.filter((row) => {
+  const filtered = rows.filter((row) => {
     if (source !== "all" && row.source !== source) return false;
     if (format !== "all" && row.format !== format) return false;
     if (os !== "all" && row.os !== os) return false;
+    if (stage === "testing" && row.promoted) return false;
+    if (stage === "scaled" && !row.promoted) return false;
     if (verdict !== "all" && row.verdict !== verdict) return false;
     if (upload === "window" && row.carryover) return false;
     if (upload === "carryover" && !row.carryover) return false;
@@ -2119,6 +2187,35 @@ function filteredDebriefRows() {
       .toLowerCase()
       .includes(query);
   });
+  const numeric = (key, direction = "desc") => (a, b) => {
+    const aValue = a[key];
+    const bValue = b[key];
+    if (aValue == null && bValue == null) return 0;
+    if (aValue == null) return 1;
+    if (bValue == null) return -1;
+    return direction === "asc" ? aValue - bValue : bValue - aValue;
+  };
+  const comparators = {
+    newest: (a, b) =>
+      (b.uploadedAt ?? "").localeCompare(a.uploadedAt ?? "") ||
+      b.spend - a.spend,
+    spend: numeric("spend"),
+    testingSpend: numeric("testingSpend"),
+    scaledSpend: numeric("scaledSpend"),
+    signups: numeric("signups"),
+    cpsu: numeric("cpsu", "asc"),
+    cpi: numeric("cpi", "asc"),
+    d1: numeric("d1"),
+    d3: numeric("d3"),
+    d7: numeric("d7"),
+    costD1: numeric("costPerRetainedD1", "asc"),
+    costD3: numeric("costPerRetainedD3", "asc"),
+    costD7: numeric("costPerRetainedD7", "asc"),
+    retentionCost: numeric("retentionCostIndex", "asc"),
+  };
+  return filtered.sort(
+    comparators[$("debriefSort").value] || comparators.newest,
+  );
 }
 
 function renderDebriefAll() {
@@ -2136,8 +2233,11 @@ function renderDebriefAll() {
     "Source",
     "Format",
     "OS",
+    "Stage",
     "Verdict",
-    "Spend",
+    "Total spend",
+    "Testing spend",
+    "Scaled spend",
     "Sign-ups",
     "Cost / sign-up",
     "CPI",
@@ -2159,8 +2259,9 @@ function renderDebriefAll() {
         <td>${escapeHtml(row.source)}</td>
         <td>${escapeHtml(row.format)}</td>
         <td>${escapeHtml(row.os)}</td>
+        <td>${row.promoted ? "Testing + scaled" : "Testing only"}</td>
         <td>${debriefVerdictChip(row)}</td>
-        ${debriefSpendCell(row)}
+        ${debriefSpendCells(row)}
         <td>${integer(row.signups)}</td>
         <td><strong>${debriefMoney(row.cpsu)}</strong></td>
         <td>${debriefMoney(row.cpi)}</td>
@@ -2184,12 +2285,13 @@ function renderDebrief() {
     `${debriefDay(s.since)} → ${debriefDay(s.until)} · Meta partner in ${data.adjustApp} · generated ${new Date(data.generatedAt).toLocaleString()}`;
   $("debriefHeadline").innerHTML =
     `<strong>${integer(s.tested)} creatives tested since ${debriefDay(s.since)}:</strong> ` +
-    `${integer(s.winners)} winners, ${integer(s.losers)} losers, ${integer(s.promoted)} promoted, ${integer(s.learning)} still learning.`;
+    `${integer(s.winners)} winners, ${integer(s.losers)} losers, ${integer(s.promoted)} scaled, ${integer(s.learning)} still learning.`;
   $("debriefSummary").innerHTML = `
     <div class="analysis-kpi primary"><span>Creatives tested</span><strong>${integer(s.tested)}</strong><p>${integer(s.middle)} decided in the middle · ${integer(s.carryover)} uploaded before ${debriefShortDay(s.since)}</p></div>
-    <div class="analysis-kpi"><span>Testing spend</span><strong>${money(s.testingSpend, true)}</strong><p>${money(s.spend, true)} including main campaigns</p></div>
+    <div class="analysis-kpi"><span>Testing spend</span><strong>${money(s.testingSpend, true)}</strong><p>${money(s.scaledSpend, true)} scaled · ${money(s.spend, true)} total</p></div>
     <div class="analysis-kpi"><span>Cost per sign-up</span><strong>${debriefMoney(s.cpsu)}</strong><p>${integer(s.signups)} sign-ups across tested creatives · typical decided ${debriefMoney(data.typical.cpsu)}</p></div>
-    <div class="analysis-kpi"><span>Live now</span><strong>${integer(s.live)}</strong><p>${integer(s.paused)} paused · ${integer(s.promoted)} promoted to main</p></div>`;
+    <div class="analysis-kpi"><span>Live now</span><strong>${integer(s.live)}</strong><p>${integer(s.paused)} paused · ${integer(s.promoted)} scaled to main</p></div>`;
+  $("debriefBenchmarks").innerHTML = renderDebriefBenchmarks(data.benchmarks);
   $("debriefSources").innerHTML = renderDebriefSources(data.bySource);
   $("debriefWinnersRule").textContent = data.rules.winners;
   $("debriefLosersRule").textContent = data.rules.losers;
@@ -2389,12 +2491,18 @@ $("refreshCompetitors").addEventListener("click", () =>
 $("applyDebrief").addEventListener("click", () => void loadDebrief());
 $("refreshDebrief").addEventListener("click", () => void loadDebrief(true));
 $("debriefSearch").addEventListener("input", renderDebriefAll);
+$("debriefPage").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-debrief-preview]");
+  if (button) void openDebriefPreview(button);
+});
 [
   "debriefSourceFilter",
   "debriefFormatFilter",
   "debriefOsFilter",
+  "debriefStageFilter",
   "debriefVerdictFilter",
   "debriefUploadFilter",
+  "debriefSort",
 ].forEach((id) => $(id).addEventListener("change", renderDebriefAll));
 
 const initialPage = new URLSearchParams(window.location.search).get("page");

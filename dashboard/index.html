@@ -254,6 +254,11 @@
             <p id="debriefHeadline" class="debrief-headline"></p>
             <div id="debriefSummary" class="analysis-summary"></div>
             <section class="analysis-card debrief-card">
+              <div class="analysis-card-title">Benchmarks · average vs best creative</div>
+              <p class="debrief-rule">Average is cohort-weighted across mature, decided creatives uploaded in the selected window. Best is the #1 retention-adjusted winner.</p>
+              <div id="debriefBenchmarks" class="data-table-wrap debrief-table-wrap"></div>
+            </section>
+            <section class="analysis-card debrief-card">
               <div class="analysis-card-title">By source</div>
               <div id="debriefSources" class="data-table-wrap debrief-table-wrap"></div>
             </section>
@@ -292,6 +297,11 @@
                   <option value="Android">Android only</option>
                   <option value="Both">iOS + Android</option>
                 </select></label>
+                <label><span>Stage</span><select id="debriefStageFilter">
+                  <option value="all">Testing + scaled</option>
+                  <option value="testing">Testing only</option>
+                  <option value="scaled">Scaled</option>
+                </select></label>
                 <label><span>Verdict</span><select id="debriefVerdictFilter">
                   <option value="all">All verdicts</option>
                   <option value="Winner">Winners</option>
@@ -303,6 +313,22 @@
                   <option value="all">Any upload date</option>
                   <option value="window">In this window</option>
                   <option value="carryover">Before this window</option>
+                </select></label>
+                <label><span>Sort by</span><select id="debriefSort">
+                  <option value="newest">Newest upload</option>
+                  <option value="spend">Total spend</option>
+                  <option value="testingSpend">Testing spend</option>
+                  <option value="scaledSpend">Scaled spend</option>
+                  <option value="signups">Most sign-ups</option>
+                  <option value="cpsu">Lowest cost / sign-up</option>
+                  <option value="cpi">Lowest CPI</option>
+                  <option value="d1">Highest D1</option>
+                  <option value="d3">Highest D3</option>
+                  <option value="d7">Highest D7</option>
+                  <option value="costD1">Lowest cost / D1 retained</option>
+                  <option value="costD3">Lowest cost / D3 retained</option>
+                  <option value="costD7">Lowest cost / D7 retained</option>
+                  <option value="retentionCost">Best retention-adjusted cost</option>
                 </select></label>
                 <div id="debriefCount" class="result-count">— results</div>
               </div>
