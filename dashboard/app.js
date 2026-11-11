@@ -1946,6 +1946,8 @@ const debriefShortDay = (value) =>
     : "—";
 const debriefMoney = (value) => (value == null ? "—" : money(value));
 const debriefPct = (value) => (value == null ? "—" : pct(value));
+const debriefRetentionCost = (row, day) =>
+  debriefMoney(row[`costPerRetainedD${day}`]);
 
 function debriefChips(row) {
   const chips = [
@@ -1986,7 +1988,11 @@ function debriefSpendCell(row) {
   return `<td>${money(row.spend)}${extra}</td>`;
 }
 
-function debriefRankedTable(rows, emptyText) {
+function debriefRankedTable(
+  rows,
+  emptyText,
+  reasonsForRow = (row) => row.reasons,
+) {
   if (!rows.length) {
     return `<div class="analysis-empty">${emptyText}</div>`;
   }
@@ -2000,8 +2006,11 @@ function debriefRankedTable(rows, emptyText) {
     "Sign-ups",
     "Cost / sign-up",
     "D1",
+    "Cost / D1 retained",
     "D3",
+    "Cost / D3 retained",
     "D7",
+    "Cost / D7 retained",
     "Why",
   ];
   return `<table class="analysis-data-table debrief-table"><thead><tr><th class="debrief-rank">#</th>${headers
@@ -2019,9 +2028,12 @@ function debriefRankedTable(rows, emptyText) {
         <td>${integer(row.signups)}</td>
         <td><strong>${debriefMoney(row.cpsu)}</strong></td>
         <td>${debriefPct(row.d1)}</td>
+        <td>${debriefRetentionCost(row, 1)}</td>
         <td>${debriefPct(row.d3)}</td>
+        <td>${debriefRetentionCost(row, 3)}</td>
         <td>${debriefPct(row.d7)}</td>
-        <td class="debrief-reasons">${row.reasons.map((reason) => `<div>${escapeHtml(reason)}</div>`).join("")}</td>
+        <td>${debriefRetentionCost(row, 7)}</td>
+        <td class="debrief-reasons">${reasonsForRow(row).map((reason) => `<div>${escapeHtml(reason)}</div>`).join("")}</td>
       </tr>`,
     )
     .join("")}</tbody></table>`;
@@ -2030,8 +2042,23 @@ function debriefRankedTable(rows, emptyText) {
 function debriefSourceRef(item) {
   if (!item) return "—";
   return `<span title="${escapeHtml(item.name)}">${escapeHtml(item.readableName)}</span> <small>${
-    item.cpsu == null ? "no sign-ups" : `${money(item.cpsu)}/SU`
+    item.retentionCost !== null && item.retentionHorizon
+      ? `${money(item.retentionCost)}/${item.retentionHorizon} retained`
+      : item.cpsu == null
+        ? "no sign-ups"
+        : `${money(item.cpsu)}/SU`
   }</small>`;
+}
+
+function debriefRetentionRiskReasons(row) {
+  const horizon = row.retentionHorizon;
+  const key = horizon?.toLowerCase();
+  const rate = key ? row[key] : null;
+  const baseline = key ? state.debrief?.typical?.[key] : null;
+  return [
+    `Efficient sign-ups: ${debriefMoney(row.cpsu)} vs ${debriefMoney(state.debrief?.typical?.cpsu)} typical`,
+    `${horizon || "Retention"}: ${debriefPct(rate)} vs ${debriefPct(baseline)} typical`,
+  ];
 }
 
 function renderDebriefSources(sources) {
@@ -2116,8 +2143,11 @@ function renderDebriefAll() {
     "CPI",
     "CTR",
     "D1",
+    "Cost / D1 retained",
     "D3",
+    "Cost / D3 retained",
     "D7",
+    "Cost / D7 retained",
   ];
   $("debriefAll").innerHTML = `<table class="analysis-data-table debrief-table"><thead><tr>${headers
     .map((header, index) => `<th class="${index === 0 ? "sticky-cell" : ""}">${header}</th>`)
@@ -2136,8 +2166,11 @@ function renderDebriefAll() {
         <td>${debriefMoney(row.cpi)}</td>
         <td>${pct(row.ctr)}</td>
         <td>${debriefPct(row.d1)}</td>
+        <td>${debriefRetentionCost(row, 1)}</td>
         <td>${debriefPct(row.d3)}</td>
+        <td>${debriefRetentionCost(row, 3)}</td>
         <td>${debriefPct(row.d7)}</td>
+        <td>${debriefRetentionCost(row, 7)}</td>
       </tr>`,
     )
     .join("")}</tbody></table>`;
@@ -2167,6 +2200,12 @@ function renderDebrief() {
   $("debriefLosers").innerHTML = debriefRankedTable(
     data.losers,
     "No decided losers yet.",
+  );
+  $("debriefRetentionRisksRule").textContent = data.rules.retentionRisks;
+  $("debriefRetentionRisks").innerHTML = debriefRankedTable(
+    data.retentionRisks,
+    "No creatives currently combine efficient sign-ups with below-typical mature retention.",
+    debriefRetentionRiskReasons,
   );
   $("debriefRules").innerHTML = Object.values(data.rules)
     .map((rule) => `<li>${escapeHtml(rule)}</li>`)
