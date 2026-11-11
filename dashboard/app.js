@@ -14,6 +14,10 @@ const state = {
   debrief: null,
   debriefLoading: false,
   debriefPollTimer: null,
+  debriefDetail: null,
+  debriefHoverTimer: null,
+  debriefHoverButton: null,
+  debriefPreviewCache: new Map(),
   scanJob: null,
   analysisReport: "overview",
 };
@@ -1982,7 +1986,7 @@ function debriefCreativeCell(row) {
   const adId = row.adIds?.[0];
   const preview =
     thumb && adId
-      ? `<button class="debrief-preview-button" data-debrief-preview="${escapeHtml(adId)}" data-debrief-name="${escapeHtml(row.readableName)}" data-debrief-thumbnail="${escapeHtml(thumb)}" aria-label="Open preview for ${escapeHtml(row.readableName)}"><img loading="lazy" src="${escapeHtml(thumb)}" alt="" /></button>`
+      ? `<button class="debrief-preview-button" data-debrief-preview="${escapeHtml(adId)}" data-debrief-creative="${escapeHtml(row.name)}" data-debrief-name="${escapeHtml(row.readableName)}" data-debrief-thumbnail="${escapeHtml(thumb)}" aria-label="Open details for ${escapeHtml(row.readableName)}"><img loading="lazy" src="${escapeHtml(thumb)}" alt="" /></button>`
       : thumb
         ? `<img loading="lazy" src="${escapeHtml(thumb)}" alt="" />`
         : '<span class="debrief-thumb-empty"></span>';
@@ -2232,37 +2236,241 @@ function renderDebriefSources(sources) {
     .join("")}</tbody></table>`;
 }
 
-async function openDebriefPreview(button) {
-  const adId = button.dataset.debriefPreview;
-  const name = button.dataset.debriefName || "Creative preview";
-  const thumbnail = safeUrl(button.dataset.debriefThumbnail);
-  if (!adId) return;
-  state.detail = null;
-  $("dialogContent").dataset.previewAdId = adId;
+async function fetchDebriefPreview(adId) {
+  const cached = state.debriefPreviewCache.get(adId);
+  if (cached) return await cached;
+  const pending = fetch(`/api/preview?adId=${encodeURIComponent(adId)}`)
+    .then(async (response) => {
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Preview unavailable");
+      const src = safeUrl(data.src);
+      if (!src) throw new Error("Unsafe preview URL");
+      state.debriefPreviewCache.set(adId, src);
+      return src;
+    })
+    .catch((error) => {
+      state.debriefPreviewCache.delete(adId);
+      throw error;
+    });
+  state.debriefPreviewCache.set(adId, pending);
+  return await pending;
+}
+
+function debriefStageDetailTable(row) {
+  const stages = [
+    ["Testing", row.testing],
+    ["Scaled", row.scaled],
+  ];
+  return `<table class="analysis-data-table debrief-table stage-detail-table">
+    <thead><tr><th class="sticky-cell">Stage</th><th>Spend</th><th>Impressions</th><th>Clicks</th><th>Installs</th><th>Sign-ups</th><th>CPI</th><th>CPSU</th><th>CTR</th><th>D1</th><th>D3</th><th>D7</th><th>Retained-user cost</th><th>Confidence</th></tr></thead>
+    <tbody>${stages
+      .map(
+        ([label, metrics]) => `<tr>
+          <td class="sticky-cell"><strong>${label}</strong></td>
+          <td>${money(metrics.spend)}</td>
+          <td>${integer(metrics.impressions)}</td>
+          <td>${integer(metrics.clicks)}</td>
+          <td>${integer(metrics.installs)}</td>
+          <td>${integer(metrics.signups)}</td>
+          <td>${debriefMoney(metrics.cpi)}</td>
+          <td>${debriefMoney(metrics.cpsu)}</td>
+          <td>${pct(metrics.ctr)}</td>
+          <td>${debriefPct(metrics.d1)}</td>
+          <td>${debriefPct(metrics.d3)}</td>
+          <td>${debriefPct(metrics.d7)}</td>
+          <td>${debriefMoney(metrics.retentionCost)}</td>
+          <td>${debriefConfidenceChip(metrics.confidence)}</td>
+        </tr>`,
+      )
+      .join("")}</tbody>
+  </table>`;
+}
+
+function debriefDetailOverview(row) {
+  return `
+    <div class="overview-grid">
+      <section class="detail-section key-metric-card"><span>Recommended action</span><strong>${escapeHtml(row.recommendedAction)}</strong><p>${escapeHtml(row.actionReason)}</p></section>
+      <section class="detail-section key-metric-card"><span>Testing cost / sign-up</span><strong>${debriefMoney(row.testing.cpsu)}</strong><p>${money(row.testing.spend, true)} testing · ${money(row.scaled.spend, true)} scaled</p></section>
+    </div>
+    <section class="detail-section hierarchy">
+      <div class="section-title">Creative context</div>
+      <dl>
+        <div><dt>Source</dt><dd>${escapeHtml(row.source)}</dd></div>
+        <div><dt>Format</dt><dd>${escapeHtml(row.format)}</dd></div>
+        <div><dt>Operating system</dt><dd>${escapeHtml(row.os)}</dd></div>
+        <div><dt>Uploaded</dt><dd>${escapeHtml(debriefDay(row.uploadedDate))}</dd></div>
+        <div><dt>Stage</dt><dd>${row.promoted ? "Testing + scaled" : "Testing only"}</dd></div>
+        <div><dt>Status</dt><dd>${escapeHtml(row.status)}</dd></div>
+        <div class="wide"><dt>Campaigns</dt><dd>${escapeHtml(row.campaigns.join("\n") || "—")}</dd></div>
+        <div class="wide"><dt>Ad sets</dt><dd>${escapeHtml(row.adSets.join("\n") || "—")}</dd></div>
+      </dl>
+    </section>`;
+}
+
+function debriefDetailPerformance(row) {
+  return `
+    <section class="detail-section">
+      <div class="section-title">Testing versus scaled performance</div>
+      <div class="data-table-wrap retention-table-wrap">${debriefStageDetailTable(row)}</div>
+    </section>
+    <section class="detail-section">
+      <div class="section-title">Testing maturity</div>
+      <div class="list-metrics">
+        <div><span>Spend to decision</span><strong>${row.spendToDecision > 0 ? money(row.spendToDecision) : "Ready"}</strong></div>
+        <div><span>Days to decision</span><strong>${row.daysToDecision == null ? "—" : row.daysToDecision === 0 ? "Ready" : `${integer(row.daysToDecision)}d`}</strong></div>
+        <div><span>Mature horizon</span><strong>${escapeHtml(row.retentionHorizon || "—")}</strong></div>
+        <div><span>Confidence</span><strong>${escapeHtml(row.retentionConfidence || "No mature cohort")}</strong></div>
+      </div>
+    </section>`;
+}
+
+function debriefDetailInsights(row) {
+  const benchmarks = (state.debrief?.segmentBenchmarks || []).filter(
+    (item) =>
+      (item.dimension === "Source" && item.segment === row.source) ||
+      (item.dimension === "OS" && item.segment === row.os) ||
+      (item.dimension === "Format" && item.segment === row.format),
+  );
+  return `
+    <section class="detail-section">
+      <div class="section-title">Decision rationale</div>
+      <p>${escapeHtml(row.actionReason)}</p>
+      ${(row.reasons || []).map((reason) => `<p>${escapeHtml(reason)}</p>`).join("")}
+    </section>
+    <section class="detail-section">
+      <div class="section-title">Relevant testing benchmarks</div>
+      <div class="data-table-wrap retention-table-wrap">${renderDebriefSegmentBenchmarks(benchmarks)}</div>
+    </section>`;
+}
+
+function renderDebriefDetail() {
+  const detail = state.debriefDetail;
+  if (!detail) return;
+  const row = detail.row;
+  const thumbnail = safeUrl(row.thumbnailUrl);
+  const pane =
+    detail.tab === "performance"
+      ? debriefDetailPerformance(row)
+      : detail.tab === "insights"
+        ? debriefDetailInsights(row)
+        : debriefDetailOverview(row);
   $("dialogContent").innerHTML = `
-    <div class="debrief-preview-shell">
-      <header class="detail-header">
-        <strong>${escapeHtml(name)}</strong>
-        <div><span>Meta ad preview</span></div>
-      </header>
-      <div id="debriefPreviewMedia" class="debrief-preview-media"><div class="spinner"></div></div>
+    <div class="detail-shell">
+      <header class="detail-header"><strong>${escapeHtml(row.readableName)}</strong><div>${debriefVerdictChip(row)}</div></header>
+      <div class="detail-layout">
+        <aside class="detail-left">
+          <div class="media-mode"><span class="active">Preview</span><span>${row.promoted ? "Testing + scaled" : "Testing only"}</span></div>
+          <div class="detail-media">
+            ${
+              detail.previewSrc
+                ? `<iframe src="${escapeHtml(detail.previewSrc)}" allow="autoplay; fullscreen" title="${escapeHtml(row.readableName)}"></iframe>`
+                : thumbnail
+                  ? `<div class="media-frame"><img src="${escapeHtml(thumbnail)}" alt="${escapeHtml(row.readableName)}" />${detail.previewLoading ? '<div class="preview-loading"><div class="spinner"></div></div>' : ""}</div>`
+                  : '<div class="media-empty">No media preview</div>'
+            }
+          </div>
+          <p class="selected-ad-name">${escapeHtml(row.name)}</p>
+        </aside>
+        <section class="detail-right">
+          <nav class="detail-tabs">
+            <button data-debrief-detail-tab="overview" class="${detail.tab === "overview" ? "active" : ""}">Overview</button>
+            <button data-debrief-detail-tab="performance" class="${detail.tab === "performance" ? "active" : ""}">Performance</button>
+            <button data-debrief-detail-tab="insights" class="${detail.tab === "insights" ? "active" : ""}">Insights</button>
+          </nav>
+          <div class="detail-pane">${pane}</div>
+        </section>
+      </div>
     </div>`;
+  $("dialogContent")
+    .querySelectorAll("[data-debrief-detail-tab]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        state.debriefDetail.tab = button.dataset.debriefDetailTab;
+        renderDebriefDetail();
+      });
+    });
+}
+
+async function openDebriefDetail(button) {
+  const creativeName = button.dataset.debriefCreative;
+  const row = state.debrief?.all?.find((item) => item.name === creativeName);
+  if (!row) return;
+  hideDebriefHoverPreview();
+  state.detail = null;
+  state.debriefDetail = {
+    row,
+    tab: "overview",
+    previewSrc: null,
+    previewLoading: Boolean(row.adIds?.[0]),
+  };
+  renderDebriefDetail();
   if (!dialog.open) dialog.showModal();
+  const adId = row.adIds?.[0];
+  if (!adId) return;
   try {
-    const response = await fetch(`/api/preview?adId=${encodeURIComponent(adId)}`);
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Preview unavailable");
-    const src = safeUrl(data.src);
-    if (!src) throw new Error("Unsafe preview URL");
-    if ($("dialogContent").dataset.previewAdId !== adId) return;
-    $("debriefPreviewMedia").innerHTML =
-      `<iframe src="${escapeHtml(src)}" allow="autoplay; fullscreen" title="${escapeHtml(name)}"></iframe>`;
-  } catch (error) {
-    if ($("dialogContent").dataset.previewAdId !== adId) return;
-    $("debriefPreviewMedia").innerHTML = thumbnail
-      ? `<img src="${escapeHtml(thumbnail)}" alt="${escapeHtml(name)}" /><p>${escapeHtml(error.message)}</p>`
-      : `<div class="media-empty">${escapeHtml(error.message)}</div>`;
+    const src = await fetchDebriefPreview(adId);
+    if (state.debriefDetail?.row.name !== row.name) return;
+    state.debriefDetail.previewSrc = src;
+  } catch {
+    // Keep the thumbnail when Meta cannot render this preview.
+  } finally {
+    if (state.debriefDetail?.row.name === row.name) {
+      state.debriefDetail.previewLoading = false;
+      renderDebriefDetail();
+    }
   }
+}
+
+function hoverPreviewElement() {
+  let element = $("debriefHoverPreview");
+  if (!element) {
+    element = document.createElement("div");
+    element.id = "debriefHoverPreview";
+    element.className = "debrief-hover-preview hidden";
+    document.body.append(element);
+  }
+  return element;
+}
+
+function hideDebriefHoverPreview() {
+  if (state.debriefHoverTimer) clearTimeout(state.debriefHoverTimer);
+  state.debriefHoverTimer = null;
+  state.debriefHoverButton = null;
+  $("debriefHoverPreview")?.classList.add("hidden");
+}
+
+function showDebriefHoverPreview(button) {
+  hideDebriefHoverPreview();
+  state.debriefHoverButton = button;
+  const element = hoverPreviewElement();
+  const thumbnail = safeUrl(button.dataset.debriefThumbnail);
+  const name = button.dataset.debriefName || "Creative preview";
+  const rect = button.getBoundingClientRect();
+  const width = 280;
+  const height = 360;
+  const left =
+    rect.right + width + 16 <= window.innerWidth
+      ? rect.right + 10
+      : Math.max(8, rect.left - width - 10);
+  const top = Math.max(8, Math.min(rect.top - 90, window.innerHeight - height - 8));
+  element.style.left = `${left}px`;
+  element.style.top = `${top}px`;
+  element.innerHTML = `${thumbnail ? `<img src="${escapeHtml(thumbnail)}" alt="${escapeHtml(name)}" />` : ""}<div><strong>${escapeHtml(name)}</strong><span>Hover preview loading…</span></div>`;
+  element.classList.remove("hidden");
+  state.debriefHoverTimer = setTimeout(async () => {
+    const adId = button.dataset.debriefPreview;
+    if (!adId || state.debriefHoverButton !== button) return;
+    try {
+      const src = await fetchDebriefPreview(adId);
+      if (state.debriefHoverButton !== button) return;
+      element.innerHTML = `<iframe src="${escapeHtml(src)}" allow="autoplay" title="${escapeHtml(name)}"></iframe><div><strong>${escapeHtml(name)}</strong><span>Click for full details</span></div>`;
+    } catch {
+      if (state.debriefHoverButton === button) {
+        element.querySelector("span").textContent =
+          "Preview unavailable · click for details";
+      }
+    }
+  }, 350);
 }
 
 function filteredDebriefRows() {
@@ -2621,6 +2829,8 @@ $("refreshButton").addEventListener("click", () => void loadData(true));
 $("closeDialog").addEventListener("click", () => dialog.close());
 dialog.addEventListener("close", () => {
   state.detail = null;
+  state.debriefDetail = null;
+  hideDebriefHoverPreview();
 });
 dialog.addEventListener("click", (event) => {
   if (event.target === dialog) dialog.close();
@@ -2652,7 +2862,19 @@ $("debriefPage").addEventListener("click", (event) => {
     return;
   }
   const button = event.target.closest("[data-debrief-preview]");
-  if (button) void openDebriefPreview(button);
+  if (button) void openDebriefDetail(button);
+});
+$("debriefPage").addEventListener("pointerover", (event) => {
+  const button = event.target.closest("[data-debrief-preview]");
+  if (button && !button.contains(event.relatedTarget)) {
+    showDebriefHoverPreview(button);
+  }
+});
+$("debriefPage").addEventListener("pointerout", (event) => {
+  const button = event.target.closest("[data-debrief-preview]");
+  if (button && !button.contains(event.relatedTarget)) {
+    hideDebriefHoverPreview();
+  }
 });
 $("debriefActionFilter").addEventListener(
   "change",
