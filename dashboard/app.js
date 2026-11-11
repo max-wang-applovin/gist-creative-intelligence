@@ -18,6 +18,7 @@ const state = {
   debriefHoverTimer: null,
   debriefHoverButton: null,
   debriefPreviewCache: new Map(),
+  expandedDecisionGroups: new Set(),
   scanJob: null,
   analysisReport: "overview",
 };
@@ -2153,10 +2154,75 @@ function renderScaledValidation(rows) {
   </table>`;
 }
 
+function clientDecisionGroups(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const concept =
+      row.testingAdSets?.[0] || row.category || "Unassigned concept";
+    const group = groups.get(concept) || [];
+    group.push(row);
+    groups.set(concept, group);
+  }
+  return [...groups.entries()].map(([concept, creatives]) => {
+    const sum = (key) =>
+      creatives.reduce(
+        (total, row) => total + Number(row.testing?.[key] || 0),
+        0,
+      );
+    const cohortRate = (day) => {
+      const cohort = sum(`d${day}Cohort`);
+      return cohort > 0 ? (sum(`retainedD${day}`) / cohort) * 100 : null;
+    };
+    const d7Cohort = sum("d7Cohort");
+    const d3Cohort = sum("d3Cohort");
+    const d1Cohort = sum("d1Cohort");
+    const confidenceCohort = d7Cohort || d3Cohort || d1Cohort;
+    const confidence =
+      confidenceCohort >= 200
+        ? "High"
+        : confidenceCohort >= 50
+          ? "Medium"
+          : confidenceCohort >= 20
+            ? "Low"
+            : null;
+    const actionCounts = { Scale: 0, Pause: 0, Iterate: 0, Wait: 0 };
+    for (const row of creatives) actionCounts[row.recommendedAction] += 1;
+    const leadAction =
+      actionCounts.Scale > 0
+        ? "Scale"
+        : actionCounts.Iterate > 0
+          ? "Iterate"
+          : actionCounts.Pause > 0
+            ? "Pause"
+            : "Wait";
+    const testingSpend = sum("spend");
+    const testingSignups = sum("signups");
+    return {
+      concept,
+      creativeCount: creatives.length,
+      testingSpend,
+      testingSignups,
+      testingCpsu:
+        testingSignups > 0 ? testingSpend / testingSignups : null,
+      d1: cohortRate(1),
+      d3: cohortRate(3),
+      d7: cohortRate(7),
+      confidence,
+      leadAction,
+      actionCounts,
+      bestCreative: creatives[0]?.readableName || null,
+      creatives,
+    };
+  });
+}
+
 function renderDebriefDecisionQueue() {
   if (!state.debrief) return;
   const selected = $("debriefActionFilter").value;
   const all = state.debrief.decisions || [];
+  const groups = state.debrief.decisionGroups?.length
+    ? state.debrief.decisionGroups
+    : clientDecisionGroups(all);
   const counts = Object.fromEntries(
     ["Scale", "Pause", "Iterate", "Wait"].map((action) => [
       action,
@@ -2169,30 +2235,64 @@ function renderDebriefDecisionQueue() {
         `<button data-debrief-action="${action}" class="debrief-action-card action-${action.toLowerCase()}"><span>${action}</span><strong>${integer(counts[action])}</strong></button>`,
     )
     .join("");
-  const rows =
+  const visibleGroups =
     selected === "all"
-      ? all
-      : all.filter((row) => row.recommendedAction === selected);
-  $("debriefDecisionQueue").innerHTML = rows.length
-    ? `<table class="analysis-data-table debrief-table decision-table">
-      <thead><tr><th>Action</th><th class="sticky-cell">Creative</th><th>Why</th><th>Testing spend</th><th>Spend remaining</th><th>Days remaining</th><th>Testing sign-ups</th><th>Testing CPSU</th><th>Mature horizon</th><th>Retained-user cost</th><th>Confidence</th></tr></thead>
-      <tbody>${rows
+      ? groups
+      : groups.filter((group) => group.actionCounts[selected] > 0);
+  const groupRows = visibleGroups
+    .map((group) => {
+      const expanded = state.expandedDecisionGroups.has(group.concept);
+      const actionMix = ["Scale", "Pause", "Iterate", "Wait"]
+        .filter((action) => group.actionCounts[action] > 0)
         .map(
-          (row) => `<tr>
-            <td><span class="debrief-action-pill action-${row.recommendedAction.toLowerCase()}">${escapeHtml(row.recommendedAction)}</span></td>
-            ${debriefCreativeCell(row)}
-            <td class="debrief-reasons">${escapeHtml(row.actionReason)}</td>
-            <td>${money(row.testing.spend)}</td>
-            <td>${row.spendToDecision > 0 ? money(row.spendToDecision) : "Ready"}</td>
-            <td>${row.daysToDecision == null ? "—" : row.daysToDecision === 0 ? "Ready" : `${integer(row.daysToDecision)}d`}</td>
-            <td>${integer(row.testing.signups)}</td>
-            <td>${debriefMoney(row.testing.cpsu)}</td>
-            <td>${escapeHtml(row.retentionHorizon || "—")}</td>
-            <td>${debriefMoney(row.retentionCost)}</td>
-            <td>${debriefConfidenceChip(row.retentionConfidence)}</td>
-          </tr>`,
+          (action) =>
+            `<span class="debrief-action-pill action-${action.toLowerCase()}">${action} ${group.actionCounts[action]}</span>`,
         )
-        .join("")}</tbody>
+        .join(" ");
+      const childRows = expanded
+        ? group.creatives
+            .filter(
+              (row) =>
+                selected === "all" || row.recommendedAction === selected,
+            )
+            .map(
+              (row) => `<tr class="decision-creative-row">
+                <td></td>
+                ${debriefCreativeCell(row)}
+                <td></td>
+                <td><span class="debrief-action-pill action-${row.recommendedAction.toLowerCase()}">${escapeHtml(row.recommendedAction)}</span></td>
+                <td class="debrief-reasons">${escapeHtml(row.actionReason)}</td>
+                <td>${money(row.testing.spend)}</td>
+                <td>${integer(row.testing.signups)}</td>
+                <td>${debriefMoney(row.testing.cpsu)}</td>
+                <td>${debriefStageRetention(row, 1)}</td>
+                <td>${debriefStageRetention(row, 3)}</td>
+                <td>${debriefStageRetention(row, 7)}</td>
+                <td>${debriefConfidenceChip(row.retentionConfidence)}</td>
+              </tr>`,
+            )
+            .join("")
+        : "";
+      return `<tr class="decision-concept-row" data-debrief-concept="${escapeHtml(group.concept)}">
+          <td><button class="concept-toggle" aria-label="${expanded ? "Collapse" : "Expand"} ${escapeHtml(group.concept)}">${expanded ? "▾" : "▸"}</button></td>
+          <td class="sticky-cell"><strong>${escapeHtml(group.concept)}</strong><small>Best: ${escapeHtml(group.bestCreative || "—")}</small></td>
+          <td>${integer(group.creativeCount)}</td>
+          <td class="decision-action-mix">${actionMix}</td>
+          <td>${escapeHtml(group.leadAction)} variants</td>
+          <td>${money(group.testingSpend)}</td>
+          <td>${integer(group.testingSignups)}</td>
+          <td>${debriefMoney(group.testingCpsu)}</td>
+          <td>${debriefPct(group.d1)}</td>
+          <td>${debriefPct(group.d3)}</td>
+          <td>${debriefPct(group.d7)}</td>
+          <td>${debriefConfidenceChip(group.confidence)}</td>
+        </tr>${childRows}`;
+    })
+    .join("");
+  $("debriefDecisionQueue").innerHTML = visibleGroups.length
+    ? `<table class="analysis-data-table debrief-table decision-table">
+      <thead><tr><th></th><th class="sticky-cell">Concept / ad group</th><th>Creatives</th><th>Action mix</th><th>Lead signal</th><th>Testing spend</th><th>Sign-ups</th><th>CPSU</th><th>D1</th><th>D3</th><th>D7</th><th>Confidence</th></tr></thead>
+      <tbody>${groupRows}</tbody>
     </table>`
     : '<div class="analysis-empty">No creatives match this action.</div>';
 }
@@ -2858,6 +2958,17 @@ $("debriefPage").addEventListener("click", (event) => {
     .debriefAction;
   if (action) {
     $("debriefActionFilter").value = action;
+    renderDebriefDecisionQueue();
+    return;
+  }
+  const concept = event.target.closest("[data-debrief-concept]")?.dataset
+    .debriefConcept;
+  if (concept) {
+    if (state.expandedDecisionGroups.has(concept)) {
+      state.expandedDecisionGroups.delete(concept);
+    } else {
+      state.expandedDecisionGroups.add(concept);
+    }
     renderDebriefDecisionQueue();
     return;
   }

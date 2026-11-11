@@ -131,6 +131,8 @@ export type DebriefCreative = {
   adIds: string[];
   campaigns: string[];
   adSets: string[];
+  testingAdSets: string[];
+  scaledAdSets: string[];
 };
 
 type CreativeRef = {
@@ -155,6 +157,22 @@ type DebriefBenchmark = {
 type DebriefSegmentBenchmark = DebriefBenchmark & {
   dimension: "Source" | "OS" | "Format";
   segment: string;
+};
+
+export type DebriefDecisionGroup = {
+  concept: string;
+  creativeCount: number;
+  testingSpend: number;
+  testingSignups: number;
+  testingCpsu: number | null;
+  d1: number | null;
+  d3: number | null;
+  d7: number | null;
+  confidence: RetentionConfidence;
+  leadAction: DebriefAction;
+  actionCounts: Record<DebriefAction, number>;
+  bestCreative: string | null;
+  creatives: DebriefCreative[];
 };
 
 export type DebriefSourceSummary = {
@@ -235,6 +253,7 @@ export type DebriefPayload = {
   retentionRisks: DebriefCreative[];
   scaledValidation: DebriefCreative[];
   decisions: DebriefCreative[];
+  decisionGroups: DebriefDecisionGroup[];
   all: DebriefCreative[];
   warnings: string[];
 };
@@ -617,6 +636,8 @@ type Acc = StageAcc & {
   scaled: StageAcc;
   campaigns: Set<string>;
   adSets: Set<string>;
+  testingAdSets: Set<string>;
+  scaledAdSets: Set<string>;
 };
 
 function emptyStageAcc(): StageAcc {
@@ -964,6 +985,8 @@ async function buildDebrief(range: {
         scaled: emptyStageAcc(),
         campaigns: new Set(),
         adSets: new Set(),
+        testingAdSets: new Set(),
+        scaledAdSets: new Set(),
       };
       byKey.set(key, acc);
     }
@@ -989,12 +1012,14 @@ async function buildDebrief(range: {
       acc.testing.signups += signups;
       acc.testingImpressions += impressions;
       acc.testingSignups += signups;
+      if (adSet) acc.testingAdSets.add(adSet);
     } else if (isMainCampaign(campaign)) {
       acc.scaled.spend += spend;
       acc.scaled.impressions += impressions;
       acc.scaled.clicks += clicks;
       acc.scaled.installs += installs;
       acc.scaled.signups += signups;
+      if (adSet) acc.scaledAdSets.add(adSet);
     }
   }
 
@@ -1166,6 +1191,8 @@ async function buildDebrief(range: {
       adIds: ads.map((ad) => ad.id),
       campaigns,
       adSets: [...adSets].filter(Boolean).sort(),
+      testingAdSets: [...acc.testingAdSets].sort(),
+      scaledAdSets: [...acc.scaledAdSets].sort(),
     });
   }
   if (metaAds.length > 0 && unmatched > 0) {
@@ -1388,6 +1415,89 @@ async function buildDebrief(range: {
         (b.retentionCostIndex ?? Number.POSITIVE_INFINITY) ||
       b.testing.spend - a.testing.spend,
   );
+  const decisionsByConcept = new Map<string, DebriefCreative[]>();
+  for (const creative of decisions) {
+    const concept =
+      creative.testingAdSets[0] ||
+      creative.category ||
+      "Unassigned concept";
+    const group = decisionsByConcept.get(concept);
+    if (group) group.push(creative);
+    else decisionsByConcept.set(concept, [creative]);
+  }
+  const decisionGroups: DebriefDecisionGroup[] = [
+    ...decisionsByConcept.entries(),
+  ].map(([concept, creatives]) => {
+    const testingSpend = creatives.reduce(
+      (sum, creative) => sum + creative.testing.spend,
+      0,
+    );
+    const testingSignups = creatives.reduce(
+      (sum, creative) => sum + creative.testing.signups,
+      0,
+    );
+    const retained = (day: 1 | 3 | 7) =>
+      creatives.reduce(
+        (sum, creative) => sum + creative.testing[`retainedD${day}`],
+        0,
+      );
+    const cohort = (day: 1 | 3 | 7) =>
+      creatives.reduce(
+        (sum, creative) => sum + creative.testing[`d${day}Cohort`],
+        0,
+      );
+    const d1Cohort = cohort(1);
+    const d3Cohort = cohort(3);
+    const d7Cohort = cohort(7);
+    const confidenceCohort =
+      d7Cohort >= MIN_RETENTION_COHORT
+        ? d7Cohort
+        : d3Cohort >= MIN_RETENTION_COHORT
+          ? d3Cohort
+          : d1Cohort;
+    const actionCounts: Record<DebriefAction, number> = {
+      Scale: 0,
+      Pause: 0,
+      Iterate: 0,
+      Wait: 0,
+    };
+    for (const creative of creatives) {
+      actionCounts[creative.recommendedAction] += 1;
+    }
+    const leadAction: DebriefAction =
+      actionCounts.Scale > 0
+        ? "Scale"
+        : actionCounts.Iterate > 0
+          ? "Iterate"
+          : actionCounts.Pause > 0
+            ? "Pause"
+            : "Wait";
+    const bestCreative = [...creatives].sort(compareBestFirst)[0];
+    return {
+      concept,
+      creativeCount: creatives.length,
+      testingSpend: round2(testingSpend),
+      testingSignups,
+      testingCpsu:
+        testingSignups > 0
+          ? round2(testingSpend / testingSignups)
+          : null,
+      d1: pctOf(retained(1), d1Cohort),
+      d3: pctOf(retained(3), d3Cohort),
+      d7: pctOf(retained(7), d7Cohort),
+      confidence: retentionConfidence(confidenceCohort),
+      leadAction,
+      actionCounts,
+      bestCreative: bestCreative?.readableName ?? null,
+      creatives,
+    };
+  });
+  decisionGroups.sort(
+    (a, b) =>
+      actionPriority[a.leadAction] - actionPriority[b.leadAction] ||
+      b.testingSpend - a.testingSpend ||
+      a.concept.localeCompare(b.concept),
+  );
 
   const benchmarkAverage = benchmarkForRows(
     "Eligible testing weighted average",
@@ -1564,6 +1674,7 @@ async function buildDebrief(range: {
           compareBestFirst(a, b),
       ),
     decisions,
+    decisionGroups,
     all,
     warnings,
   };

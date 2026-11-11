@@ -311,6 +311,15 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-action-pill.action-iterate { background: #e5edfb; color: #185ecb; }
 .debrief-action-pill.action-wait { background: #fdf1de; color: #9a5d0c; }
 .debrief-decision-queue { max-height: 620px; }
+.decision-concept-row { background: #f4f7fb; cursor: pointer !important; }
+.decision-concept-row:hover td { background: #eaf0f8 !important; }
+.decision-concept-row .sticky-cell { background: #f4f7fb; }
+.decision-concept-row small { display: block; margin-top: 2px; color: #75808b; }
+.decision-creative-row td { background: white; }
+.decision-creative-row .debrief-creative { padding-left: 20px; }
+.decision-action-mix { min-width: 210px; text-align: left !important; }
+.decision-action-mix .debrief-action-pill { margin: 2px; }
+.concept-toggle { width: 26px; height: 26px; border: 1px solid #d7dde4; border-radius: 6px; padding: 0; background: white; color: #4d5864; }
 .debrief-table-wrap { max-height: none; }
 .debrief-all { max-height: 720px; }
 .debrief-table { width: 100%; font-size: 11px; }
