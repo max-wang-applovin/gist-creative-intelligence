@@ -1613,61 +1613,75 @@ function retentionConfig(day) {
     rate: `adjustRetentionD${day}`,
     numerator: `adjustRetainedD${day}`,
     denominator: `adjustRetentionDenD${day}`,
-    minimum: day === 7 ? 50 : day === 3 ? 75 : 100,
   };
 }
 
-function retentionLeaders(rows, day, limit = 10) {
-  const config = retentionConfig(day);
+function retentionLeaders(rows, limit = 10) {
+  const d1 = retentionConfig(1);
+  const d3 = retentionConfig(3);
+  const d7 = retentionConfig(7);
   return rows
     .filter(
       (row) =>
         row.metaSpend > 0 &&
         !row.creativeName.includes("{{") &&
-        Number(row[config.denominator] || 0) >= config.minimum,
+        Number(row[d7.denominator] || 0) >= 50,
     )
     .sort(
       (a, b) =>
-        Number(b[config.rate] || 0) - Number(a[config.rate] || 0) ||
-        Number(b[config.denominator] || 0) -
-          Number(a[config.denominator] || 0),
+        Number(b[d7.rate] || 0) - Number(a[d7.rate] || 0) ||
+        Number(b[d3.rate] || 0) - Number(a[d3.rate] || 0) ||
+        Number(b[d1.rate] || 0) - Number(a[d1.rate] || 0) ||
+        Number(b[d7.denominator] || 0) - Number(a[d7.denominator] || 0),
     )
     .slice(0, limit);
 }
 
-function retentionPanel(rows, day, limit = 7) {
+function retentionTableCell(row, day) {
   const config = retentionConfig(day);
-  const leaders = retentionLeaders(rows, day, limit);
+  return `<td class="retention-period">
+    <strong>${retentionPct(row[config.rate], row[config.denominator])}</strong>
+    <small>${integer(row[config.numerator])}/${integer(row[config.denominator])}</small>
+  </td>`;
+}
+
+function retentionLeadersTable(rows, limit = 10) {
+  const leaders = retentionLeaders(rows, limit);
+  if (!leaders.length) {
+    return '<div class="analysis-empty">No creative has at least 50 mature D7 installs in this window. Choose a longer date range.</div>';
+  }
   return `
-    <section class="retention-panel">
-      <header><div><span>D${day}</span><strong>Top retention</strong></div><small>min ${config.minimum} mature installs</small></header>
-      ${
-        leaders.length
-          ? leaders
-              .map((row, index) => {
-                const thumb = safeUrl(row.media[0]?.thumbnailUrl);
-                return `<div class="retention-leader" data-analysis-creative="${escapeHtml(row.creativeId)}">
-                  <span class="retention-rank">#${index + 1}</span>
-                  ${thumb ? `<img src="${escapeHtml(thumb)}" alt="" />` : "<div></div>"}
-                  <div><strong>${escapeHtml(row.creativeName)}</strong><small>${money(row.metaSpend, true)} spend · ${money(row.cpi)} CPI</small></div>
-                  <div class="retention-value"><strong>${pct(row[config.rate])}</strong><small>${integer(row[config.numerator])}/${integer(row[config.denominator])}</small></div>
-                </div>`;
-              })
-              .join("")
-          : `<div class="analysis-empty">No mature D${day} cohort meets the minimum in this window. Choose a longer date range.</div>`
-      }
-    </section>`;
+    <table class="analysis-data-table retention-combined-table">
+      <thead><tr><th>#</th><th class="sticky-cell">Creative</th><th>Spend</th><th>CPI</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
+      <tbody>${leaders
+        .map((row, index) => {
+          const thumb = safeUrl(row.media[0]?.thumbnailUrl);
+          return `<tr data-analysis-creative="${escapeHtml(row.creativeId)}">
+            <td class="retention-rank">${index + 1}</td>
+            <td class="sticky-cell retention-creative">
+              <div>
+                ${thumb ? `<img src="${escapeHtml(thumb)}" alt="" />` : '<span class="retention-thumb-empty"></span>'}
+                <strong>${escapeHtml(row.creativeName)}</strong>
+              </div>
+            </td>
+            <td>${money(row.metaSpend, true)}</td>
+            <td>${money(row.cpi)}</td>
+            ${retentionTableCell(row, 1)}
+            ${retentionTableCell(row, 3)}
+            ${retentionTableCell(row, 7)}
+          </tr>`;
+        })
+        .join("")}</tbody>
+    </table>`;
 }
 
 function renderRetentionReport(rows) {
   return (
     reportHeader(
       "Retention Leaders",
-      "Highest D1/D3/D7 Adjust calendar-cohort retention with mature-cohort minimums; raw retained/mature counts shown.",
+      "Top 10 ranked by D7 retention; D1/D3/D7 use mature Adjust calendar cohorts and show retained/mature counts.",
     ) +
-    `<div class="retention-columns report-retention">${[1, 3, 7]
-      .map((day) => retentionPanel(rows, day, 15))
-      .join("")}</div>`
+    `<div class="data-table-wrap retention-table-wrap">${retentionLeadersTable(rows, 10)}</div>`
   );
 }
 
@@ -1857,9 +1871,7 @@ function renderAnalysis() {
   $("watchCreatives").innerHTML = watch
     .map((row) => analysisCreativeRow(row, analyses.get(row.creativeId), "watch"))
     .join("");
-  $("retentionLeadersOverview").innerHTML = [1, 3, 7]
-    .map((day) => retentionPanel(all, day, 5))
-    .join("");
+  $("retentionLeadersOverview").innerHTML = retentionLeadersTable(all, 10);
 
   if (scannedRows.length) {
     $("conceptBreakdown").innerHTML = conceptBreakdown(scannedRows, analyses);
@@ -1989,6 +2001,7 @@ function debriefRankedTable(rows, emptyText) {
     "Cost / sign-up",
     "D1",
     "D3",
+    "D7",
     "Why",
   ];
   return `<table class="analysis-data-table debrief-table"><thead><tr><th class="debrief-rank">#</th>${headers
@@ -2007,6 +2020,7 @@ function debriefRankedTable(rows, emptyText) {
         <td><strong>${debriefMoney(row.cpsu)}</strong></td>
         <td>${debriefPct(row.d1)}</td>
         <td>${debriefPct(row.d3)}</td>
+        <td>${debriefPct(row.d7)}</td>
         <td class="debrief-reasons">${row.reasons.map((reason) => `<div>${escapeHtml(reason)}</div>`).join("")}</td>
       </tr>`,
     )
@@ -2103,6 +2117,7 @@ function renderDebriefAll() {
     "CTR",
     "D1",
     "D3",
+    "D7",
   ];
   $("debriefAll").innerHTML = `<table class="analysis-data-table debrief-table"><thead><tr>${headers
     .map((header, index) => `<th class="${index === 0 ? "sticky-cell" : ""}">${header}</th>`)
@@ -2122,6 +2137,7 @@ function renderDebriefAll() {
         <td>${pct(row.ctr)}</td>
         <td>${debriefPct(row.d1)}</td>
         <td>${debriefPct(row.d3)}</td>
+        <td>${debriefPct(row.d7)}</td>
       </tr>`,
     )
     .join("")}</tbody></table>`;

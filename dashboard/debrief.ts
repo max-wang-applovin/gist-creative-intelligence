@@ -18,7 +18,7 @@ const DECISION_SPEND = 350;
 const DECISION_DAYS = 7;
 const DECISION_MIN_SPEND_AT_DAYS = 100;
 const WINNER_MIN_SIGNUPS = 10;
-const LIST_SIZE = 15;
+const LIST_SIZE = 10;
 const MIN_RETENTION_COHORT = 20;
 /** Ignore funnel gaps smaller than ±15% when explaining a verdict. */
 const MIN_REASON_GAP = Math.log(1.15);
@@ -66,8 +66,10 @@ export type DebriefCreative = {
   cpsu: number | null;
   d1: number | null;
   d3: number | null;
+  d7: number | null;
   d1Cohort: number;
   d3Cohort: number;
+  d7Cohort: number;
   eligible: boolean;
   verdict: DebriefVerdict;
   reasons: string[];
@@ -333,8 +335,10 @@ type Acc = {
   testingSignups: number;
   retainedD1: number;
   retainedD3: number;
+  retainedD7: number;
   cohortD1: number;
   cohortD3: number;
+  cohortD7: number;
   campaigns: Set<string>;
   adSets: Set<string>;
 };
@@ -540,7 +544,12 @@ async function buildDebrief(range: {
       app.token,
       range,
       ["day", "partner_name", "creative_network"],
-      ["installs", "retained_users_d1", "retained_users_d3"],
+      [
+        "installs",
+        "retained_users_d1",
+        "retained_users_d3",
+        "retained_users_d7",
+      ],
       "Adjust retention cohorts",
     ),
     fetchMetaAdInventory().catch((error: unknown) => {
@@ -581,8 +590,10 @@ async function buildDebrief(range: {
         testingSignups: 0,
         retainedD1: 0,
         retainedD3: 0,
+        retainedD7: 0,
         cohortD1: 0,
         cohortD3: 0,
+        cohortD7: 0,
         campaigns: new Set(),
         adSets: new Set(),
       };
@@ -611,6 +622,7 @@ async function buildDebrief(range: {
 
   const cutoffD1 = fullMatureCutoff(1);
   const cutoffD3 = fullMatureCutoff(3);
+  const cutoffD7 = fullMatureCutoff(7);
   for (const row of retentionRows) {
     const name = usableName(row);
     if (!name) continue;
@@ -625,6 +637,10 @@ async function buildDebrief(range: {
     if (day && day <= cutoffD3) {
       acc.retainedD3 += num(row.retained_users_d3);
       acc.cohortD3 += installs;
+    }
+    if (day && day <= cutoffD7) {
+      acc.retainedD7 += num(row.retained_users_d7);
+      acc.cohortD7 += installs;
     }
   }
 
@@ -722,8 +738,13 @@ async function buildDebrief(range: {
         acc.cohortD3 >= MIN_RETENTION_COHORT
           ? pctOf(acc.retainedD3, acc.cohortD3)
           : null,
+      d7:
+        acc.cohortD7 >= MIN_RETENTION_COHORT
+          ? pctOf(acc.retainedD7, acc.cohortD7)
+          : null,
       d1Cohort: acc.cohortD1,
       d3Cohort: acc.cohortD3,
+      d7Cohort: acc.cohortD7,
       eligible,
       verdict: eligible ? "Middle" : "Learning",
       reasons: [],
@@ -849,7 +870,7 @@ async function buildDebrief(range: {
       winners: `${LIST_SIZE} lowest cost per sign-up among decided creatives uploaded in the window with ≥ ${WINNER_MIN_SIGNUPS} sign-ups.`,
       losers: `${LIST_SIZE} highest cost per sign-up among the other decided creatives uploaded in the window; zero-sign-up spenders rank worst. Older creatives are listed but not ranked.`,
       promoted: "Also spent in a main “Leads_CBO on” campaign.",
-      retention: `D1/D3 = retained users / installs from fully matured Adjust cohorts; shown when the matured cohort has ≥ ${MIN_RETENTION_COHORT} installs.`,
+      retention: `D1/D3/D7 = retained users / installs from fully matured Adjust cohorts; shown when the matured cohort has ≥ ${MIN_RETENTION_COHORT} installs.`,
     },
     typical,
     bySource,
