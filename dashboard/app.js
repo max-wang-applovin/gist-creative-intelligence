@@ -24,6 +24,8 @@ const state = {
   fatigue: null,
   fatigueError: null,
   fatigueRequest: 0,
+  fatigueTimer: null,
+  fatigueLoadingKey: null,
   competitors: null,
   debrief: null,
   debriefComparison: null,
@@ -2064,6 +2066,9 @@ async function loadData(force = false) {
   state.fatigue = null;
   state.fatigueError = null;
   state.fatigueRequest += 1;
+  if (state.fatigueTimer) clearTimeout(state.fatigueTimer);
+  state.fatigueTimer = null;
+  state.fatigueLoadingKey = null;
   state.visibleCards = 60;
   loading.classList.remove("hidden");
   grid.innerHTML = "";
@@ -2165,12 +2170,110 @@ function creativeScore(row) {
   return spend * 0.2 + cpi * 0.3 + cvr * 0.25 + d7 * 0.25;
 }
 
-function analysisCreativeRow(row, analysis, mode) {
+function numericMedian(values) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function analysisBaselines(rows) {
+  return {
+    cpi:
+      state.payload?.totals?.cpi ||
+      numericMedian(rows.map((row) => row.cpi).filter((value) => value > 0)),
+    ctr:
+      state.payload?.totals?.ctr ||
+      numericMedian(rows.map((row) => row.metaCtr)),
+    d7: numericMedian(
+      rows
+        .filter((row) => row.adjustRetentionDenD7 >= 50)
+        .map((row) => row.adjustRetentionD7),
+    ),
+  };
+}
+
+function performanceExplanation(row, mode, baselines) {
+  const reasons = [];
+  if (row.cpi > 0 && baselines.cpi > 0) {
+    const gap = ((row.cpi - baselines.cpi) / baselines.cpi) * 100;
+    if (gap <= -15) {
+      reasons.push(
+        `CPI ${Math.abs(gap).toFixed(0)}% below the account average`,
+      );
+    } else if (gap >= 20) {
+      reasons.push(`CPI ${gap.toFixed(0)}% above the account average`);
+    }
+  }
+  if (row.metaCtr > 0 && baselines.ctr > 0) {
+    const gap = ((row.metaCtr - baselines.ctr) / baselines.ctr) * 100;
+    if (gap >= 20) reasons.push(`CTR ${gap.toFixed(0)}% above average`);
+    else if (gap <= -20) {
+      reasons.push(`CTR ${Math.abs(gap).toFixed(0)}% below average`);
+    }
+  }
+  if (
+    row.adjustRetentionDenD7 >= 50 &&
+    baselines.d7 != null &&
+    baselines.d7 > 0
+  ) {
+    const gap =
+      ((row.adjustRetentionD7 - baselines.d7) / baselines.d7) * 100;
+    if (gap >= 15) reasons.push(`D7 ${gap.toFixed(0)}% above benchmark`);
+    else if (gap <= -15) {
+      reasons.push(`D7 ${Math.abs(gap).toFixed(0)}% below benchmark`);
+    }
+  }
+  if (!reasons.length && row.adjustInstalls === 0 && row.metaSpend >= 100) {
+    reasons.push(`No installs from ${money(row.metaSpend, true)} spend`);
+  }
+  if (!reasons.length) {
+    reasons.push(
+      mode === "working"
+        ? `CPI, CTR, and mature retention are near selected-window benchmarks`
+        : `No single metric explains the result; review ${money(row.cpi)} CPI on ${money(row.metaSpend, true)} spend`,
+    );
+  }
+  return `${reasons.slice(0, 2).join(" · ")}.`;
+}
+
+function splitCreativeToken(value) {
+  return String(value || "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/(\d)([A-Z][a-z])/g, "$1 $2")
+    .trim();
+}
+
+function creativeMetadata(row) {
+  const tokens = row.creativeName.split("_");
+  const hasDate = /^\d{6}$/.test(tokens[0] || "");
+  const offset = hasDate ? 1 : 0;
+  return {
+    source: splitCreativeToken(tokens[offset] || "Unknown source"),
+    category: splitCreativeToken(tokens[offset + 1] || "Unclassified"),
+    creator: splitCreativeToken(tokens[offset + 2] || "No creator"),
+    hook: splitCreativeToken(tokens[offset + 3] || "Unclassified hook"),
+    mediaType:
+      row.media?.some((media) => media.mediaType === "video")
+        ? "Video"
+        : row.media?.some((media) => media.mediaType === "image")
+          ? "Static"
+          : "Unknown",
+  };
+}
+
+function analysisCreativeRow(row, analysis, mode, baselines) {
   const thumb = cardThumbnail(row.media[0]);
-  const note =
+  const evidence = performanceExplanation(row, mode, baselines);
+  const visual =
     mode === "working"
-      ? analysis?.strengths?.[0] || analysis?.summary || "Strong blended performance."
-      : analysis?.risks?.[0] || analysis?.summary || "High cost or weak conversion signal.";
+      ? analysis?.strengths?.[0] || analysis?.summary
+      : analysis?.risks?.[0] || analysis?.summary;
+  const note = visual
+    ? `${evidence} Visual read: ${visual}`
+    : evidence;
   const metric =
     mode === "working"
       ? `<strong>${money(row.cpi)}</strong><span>CPI · ${retentionPct(row.adjustRetentionD7, row.adjustRetentionDenD7)} D7</span>`
@@ -2220,6 +2323,144 @@ function groupedPerformanceRow(name, value, maxSpend) {
         <span title="${escapeHtml(d3.sample)}">D3 <strong>${d3.rate}</strong></span>
       </div>
     </div>`;
+}
+
+function metadataConceptBreakdown(rows) {
+  const dimensions = [
+    ["category", "Category"],
+    ["source", "Source"],
+    ["hook", "Hook"],
+    ["creator", "Creator"],
+    ["mediaType", "Media type"],
+  ];
+  return `<div class="concept-dimensions metadata-concepts">${dimensions
+    .map(([key, label]) => {
+      const groups = new Map();
+      for (const row of rows) {
+        const value = creativeMetadata(row)[key] || "Other";
+        const current = groups.get(value) || {
+          spend: 0,
+          installs: 0,
+          retainedD1: 0,
+          retentionDenD1: 0,
+          retainedD3: 0,
+          retentionDenD3: 0,
+          count: 0,
+        };
+        addGroupedPerformance(current, row);
+        groups.set(value, current);
+      }
+      const sorted = [...groups.entries()]
+        .sort((a, b) => b[1].spend - a[1].spend)
+        .slice(0, 8);
+      const max = Math.max(...sorted.map(([, value]) => value.spend), 1);
+      return `<div class="concept-dimension"><h4>${label} <small>name/ad metadata</small></h4>${sorted
+        .map(([name, value]) => groupedPerformanceRow(name, value, max))
+        .join("")}</div>`;
+    })
+    .join("")}</div>`;
+}
+
+function metadataWinnerRecipe(rows) {
+  const increaseRows = budgetRecommendations(rows)
+    .filter((item) => item.action === "Increase")
+    .map((item) => item.row);
+  const candidates = increaseRows.length
+    ? increaseRows
+    : [...rows]
+        .filter((row) => row.metaSpend >= 500 && row.cpi > 0)
+        .sort((a, b) => creativeScore(b) - creativeScore(a))
+        .slice(0, Math.max(5, Math.ceil(rows.length * 0.1)));
+  const mode = (key) => {
+    const values = new Map();
+    for (const row of candidates) {
+      const value = creativeMetadata(row)[key] || "Other";
+      const current = values.get(value) || { spend: 0, count: 0 };
+      current.spend += row.metaSpend;
+      current.count += 1;
+      values.set(value, current);
+    }
+    return [...values.entries()].sort(
+      (a, b) => b[1].spend - a[1].spend,
+    )[0] || ["Not enough data", { spend: 0, count: 0 }];
+  };
+  return `<div class="recipe-grid">${[
+    ["category", "Category"],
+    ["source", "Source"],
+    ["hook", "Hook"],
+    ["creator", "Creator"],
+    ["mediaType", "Media type"],
+  ]
+    .map(([key, label]) => {
+      const [value, evidence] = mode(key);
+      return `<div class="recipe-step"><span>${label}</span><strong>${escapeHtml(value)}</strong><p>${evidence.count} opportunity candidate${evidence.count === 1 ? "" : "s"} · ${money(evidence.spend, true)} spend</p></div>`;
+    })
+    .join("")}</div>`;
+}
+
+function budgetRecommendations(rows) {
+  const baselines = analysisBaselines(rows);
+  return rows
+    .filter((row) => row.metaSpend >= 500 && row.cpi > 0)
+    .map((row) => {
+      const cpiIndex =
+        baselines.cpi > 0 ? row.cpi / baselines.cpi : 1;
+      const d7Ready = row.adjustRetentionDenD7 >= 50;
+      const d7Index =
+        d7Ready && baselines.d7 > 0
+          ? row.adjustRetentionD7 / baselines.d7
+          : null;
+      const increase = cpiIndex <= 0.85 && d7Index != null && d7Index >= 1;
+      const retentionOverride = d7Index != null && d7Index >= 1.15;
+      const reduce =
+        (cpiIndex >= 1.25 && !retentionOverride) ||
+        (d7Index != null && d7Index <= 0.8);
+      const action = increase ? "Increase" : reduce ? "Reduce" : "Hold";
+      const suggestedChange = increase
+        ? cpiIndex <= 0.7 && d7Index >= 1.15
+          ? 20
+          : 10
+        : reduce
+          ? (cpiIndex >= 1.5 && !retentionOverride) ||
+            (d7Index != null && d7Index <= 0.65)
+            ? -20
+            : -10
+          : 0;
+      const reasons = [];
+      if (cpiIndex <= 0.85) {
+        reasons.push(`${Math.round((1 - cpiIndex) * 100)}% cheaper CPI`);
+      } else if (cpiIndex >= 1.25) {
+        reasons.push(`${Math.round((cpiIndex - 1) * 100)}% higher CPI`);
+      }
+      if (d7Index === 1) {
+        reasons.push("D7 at peer median");
+      } else if (d7Index != null && d7Index > 1) {
+        reasons.push(
+          `${Math.round((d7Index - 1) * 100)}% above peer-median D7`,
+        );
+      } else if (d7Index != null && d7Index < 1) {
+        reasons.push(
+          `${Math.round((1 - d7Index) * 100)}% below peer-median D7`,
+        );
+      } else {
+        reasons.push("D7 cohort still maturing");
+      }
+      return {
+        row,
+        action,
+        suggestedChange,
+        reason: reasons.join(" · "),
+        cpiIndex,
+        d7Index,
+      };
+    })
+    .sort(
+      (a, b) =>
+        ({ Increase: 0, Reduce: 1, Hold: 2 })[a.action] -
+          ({ Increase: 0, Reduce: 1, Hold: 2 })[b.action] ||
+        Math.abs(b.suggestedChange) - Math.abs(a.suggestedChange) ||
+        b.row.metaSpend - a.row.metaSpend,
+    );
 }
 
 function conceptBreakdown(scannedRows, analyses) {
@@ -2844,6 +3085,98 @@ function renderFatigueReport() {
   );
 }
 
+function renderBudgetReport(rows) {
+  const recommendations = budgetRecommendations(rows);
+  const counts = {
+    Increase: recommendations.filter((item) => item.action === "Increase")
+      .length,
+    Reduce: recommendations.filter((item) => item.action === "Reduce").length,
+    Hold: recommendations.filter((item) => item.action === "Hold").length,
+  };
+  return (
+    reportHeader(
+      "Budget Opportunities",
+      "Read-only recommendations using CPI versus the selected-window account average and mature D7 versus the creative benchmark. Apply changes gradually and preserve test controls.",
+    ) +
+    `<div class="fatigue-summary budget-summary">
+      <div><span>Increase</span><strong>${integer(counts.Increase)}</strong></div>
+      <div><span>Reduce</span><strong>${integer(counts.Reduce)}</strong></div>
+      <div><span>Hold</span><strong>${integer(counts.Hold)}</strong></div>
+      <div><span>Evaluated</span><strong>${integer(recommendations.length)}</strong></div>
+    </div>
+    <div class="data-table-wrap"><table class="analysis-data-table budget-table">
+      <thead><tr><th class="sticky-cell">Creative</th><th>Recommendation</th><th>Suggested change</th><th>Spend</th><th>CPI</th><th>D7</th><th>Mature D7 N</th><th>Why</th></tr></thead>
+      <tbody>${recommendations
+        .slice(0, 150)
+        .map(
+          ({ row, action, suggestedChange, reason }) => `<tr data-analysis-creative="${escapeHtml(row.creativeId)}">
+            <td class="sticky-cell">${escapeHtml(row.creativeName)}</td>
+            <td><span class="budget-action ${action.toLowerCase()}">${action}</span></td>
+            <td><strong>${suggestedChange > 0 ? "+" : ""}${suggestedChange}%</strong></td>
+            <td>${money(row.metaSpend)}</td>
+            <td>${money(row.cpi)}</td>
+            <td>${retentionPct(row.adjustRetentionD7, row.adjustRetentionDenD7)}</td>
+            <td>${integer(row.adjustRetentionDenD7)}</td>
+            <td>${escapeHtml(reason)}</td>
+          </tr>`,
+        )
+        .join("")}</tbody>
+    </table></div>`
+  );
+}
+
+function renderWeeklyBrief(rows) {
+  const baselines = analysisBaselines(rows);
+  const recommendations = budgetRecommendations(rows);
+  const allScale = recommendations.filter(
+    (item) => item.action === "Increase",
+  );
+  const scale = allScale.slice(0, 5);
+  const reduce = recommendations
+    .filter((item) => item.action === "Reduce")
+    .slice(0, 5);
+  const working = [...rows]
+    .filter((row) => row.metaSpend >= 1_000)
+    .sort((a, b) => creativeScore(b) - creativeScore(a))
+    .slice(0, 5);
+  const fatigue = (state.fatigue?.creatives || [])
+    .filter((item) => item.status === "Fatiguing")
+    .slice(0, 5);
+  const d7Ready = rows.filter(
+    (row) => row.adjustRetentionDenD7 >= 50,
+  ).length;
+  const list = (items, valueFor, empty) =>
+    items.length
+      ? `<ol>${items
+          .map(
+            (item) =>
+              `<li>${escapeHtml(valueFor(item))}</li>`,
+          )
+          .join("")}</ol>`
+      : `<p>${empty}</p>`;
+  return `<div class="weekly-brief">
+    <header>
+      <div><p class="eyebrow">CREATIVE INTELLIGENCE</p><h2>Weekly Creative Brief</h2><span>${state.payload.range.since} → ${state.payload.range.until} · generated ${new Date().toLocaleString()}</span></div>
+      <button id="printWeeklyBrief" class="analysis-primary" type="button" ${!state.fatigue && !state.fatigueError ? "disabled" : ""}>${!state.fatigue && !state.fatigueError ? "Preparing fatigue…" : "Print / Save PDF"}</button>
+    </header>
+    <div class="weekly-brief-kpis">
+      <div><span>Spend</span><strong>${money(state.payload.totals.spend, true)}</strong></div>
+      <div><span>Installs</span><strong>${compact(state.payload.totals.installs)}</strong></div>
+      <div><span>Account CPI</span><strong>${money(baselines.cpi)}</strong></div>
+      <div><span>D7 ready</span><strong>${integer(d7Ready)}</strong></div>
+      <div><span>Scale opportunities</span><strong>${integer(allScale.length)}</strong></div>
+      <div><span>Fatiguing</span><strong>${state.fatigue ? integer(state.fatigue.summary.fatiguing) : state.fatigueError ? "Unavailable" : "Loading…"}</strong></div>
+    </div>
+    <div class="weekly-brief-grid">
+      <section><h3>What is working</h3>${list(working, (row) => `${row.creativeName} — ${performanceExplanation(row, "working", baselines)}`, "No high-spend winners in this window.")}</section>
+      <section><h3>Increase opportunities</h3>${list(scale, (item) => `${item.row.creativeName} — ${item.suggestedChange > 0 ? "+" : ""}${item.suggestedChange}% · ${item.reason}`, "No mature scale opportunities.")}</section>
+      <section><h3>Reduce opportunities</h3>${list(reduce, (item) => `${item.row.creativeName} — ${item.suggestedChange}% · ${item.reason}`, "No reduction opportunities.")}</section>
+      <section><h3>Fatigue watch</h3>${list(fatigue, (item) => `${item.creativeName} — ${item.reasons.join(" · ")}`, state.fatigue ? "No fatigue signals." : "Fatigue analysis is loading in the background.")}</section>
+    </div>
+    <footer>Recommendations are directional and read-only. Validate budget changes against campaign constraints and experiment controls.</footer>
+  </div>`;
+}
+
 function renderLandingReport(rows) {
   if (!state.mediaAllLoaded) {
     return (
@@ -2958,6 +3291,8 @@ function renderAnalysisReport() {
     copy: () => renderCopyReport(rows, analyses),
     retention: () => renderRetentionReport(rows),
     fatigue: () => renderFatigueReport(),
+    budget: () => renderBudgetReport(rows),
+    brief: () => renderWeeklyBrief(rows),
     landing: () => renderLandingReport(rows),
     data: () =>
       reportHeader(
@@ -2968,6 +3303,15 @@ function renderAnalysisReport() {
   $("analysisReportView").innerHTML =
     renderers[report]?.() || '<div class="analysis-empty">Report unavailable.</div>';
   attachReportCardClicks();
+  $("printWeeklyBrief")?.addEventListener("click", () => {
+    document.body.classList.add("printing-weekly-brief");
+    window.addEventListener(
+      "afterprint",
+      () => document.body.classList.remove("printing-weekly-brief"),
+      { once: true },
+    );
+    window.print();
+  });
 }
 
 function setAnalysisReport(report) {
@@ -3005,6 +3349,7 @@ function setAnalysisReport(report) {
     void loadMedia(currentRangeParams(), 0, hookIds);
   }
   if (report === "fatigue" && !state.fatigue) void loadFatigue();
+  if (report === "brief" && !state.fatigue) void loadFatigue();
 }
 
 function accountVideoPanel() {
@@ -3031,27 +3376,38 @@ function renderAnalysis() {
       : "");
 
   const all = state.payload.creatives;
+  const baselines = analysisBaselines(all);
+  const recommendations = budgetRecommendations(all);
+  const scaleOpportunities = recommendations.filter(
+    (item) => item.action === "Increase",
+  ).length;
+  const needsAttention = recommendations.filter(
+    (item) => item.action === "Reduce",
+  ).length;
+  const d7Ready = all.filter(
+    (row) => row.adjustRetentionDenD7 >= 50,
+  ).length;
   const top3Spend = all.slice(0, 3).reduce((sum, row) => sum + row.metaSpend, 0);
   const totalSpend = state.payload.totals.spend || 1;
   const hookRate = state.videoMetrics?.totals?.hookRate;
-  const health = all.length
-    ? Math.round(
-        (all
-          .filter((row) => row.metaSpend >= 1000)
-          .slice(0, 20)
-          .reduce((sum, row) => sum + creativeScore(row), 0) /
-          Math.max(
-            1,
-            all.filter((row) => row.metaSpend >= 1000).slice(0, 20).length,
-          )) *
-          100,
-      )
-    : 0;
   $("analysisSummary").innerHTML = `
-    <div class="analysis-kpi primary"><span>Creative health</span><strong>${health}/100</strong><p>Performance blend, not a business KPI</p></div>
+    <div class="analysis-kpi primary"><span>Scale opportunities</span><strong>${integer(scaleOpportunities)}</strong><p>Efficient CPI + mature D7</p></div>
+    <div class="analysis-kpi"><span>Needs attention</span><strong>${integer(needsAttention)}</strong><p>High CPI or weak mature D7</p></div>
+    <div class="analysis-kpi"><span>D7 decision-ready</span><strong>${integer(d7Ready)}</strong><p>50+ mature D7 installs</p></div>
+    <div class="analysis-kpi"><span>Fatiguing</span><strong>${state.fatigue ? integer(state.fatigue.summary.fatiguing) : state.fatigueError ? "Error" : "…"}</strong><p>${state.fatigueError ? escapeHtml(state.fatigueError) : "CTR, CPM, and spend decay"}</p></div>
     <div class="analysis-kpi"><span>Account spend</span><strong>${money(state.payload.totals.spend, true)}</strong><p>${state.payload.range.since} → ${state.payload.range.until}</p></div>
     <div class="analysis-kpi"><span>Meta hook rate</span><strong>${hookRate == null ? "—" : pct(hookRate)}</strong><p>3-second views / impressions</p></div>
     <div class="analysis-kpi"><span>Top 3 concentration</span><strong>${((top3Spend / totalSpend) * 100).toFixed(0)}%</strong><p>Share of account spend</p></div>`;
+  if (
+    !state.fatigue &&
+    !state.fatigueError &&
+    !state.fatigueTimer
+  ) {
+    state.fatigueTimer = setTimeout(() => {
+      if (state.page === "analysis") void loadFatigue();
+      else state.fatigueTimer = null;
+    }, 1_500);
+  }
 
   const working = [...all]
     .filter((row) => row.metaSpend >= 1000)
@@ -3074,10 +3430,24 @@ function renderAnalysis() {
   ];
   void loadMedia(currentRangeParams(), 0, overviewMediaIds);
   $("workingCreatives").innerHTML = working
-    .map((row) => analysisCreativeRow(row, analyses.get(row.creativeId), "working"))
+    .map((row) =>
+      analysisCreativeRow(
+        row,
+        analyses.get(row.creativeId),
+        "working",
+        baselines,
+      ),
+    )
     .join("");
   $("watchCreatives").innerHTML = watch
-    .map((row) => analysisCreativeRow(row, analyses.get(row.creativeId), "watch"))
+    .map((row) =>
+      analysisCreativeRow(
+        row,
+        analyses.get(row.creativeId),
+        "watch",
+        baselines,
+      ),
+    )
     .join("");
   $("retentionLeadersOverview").innerHTML = retentionLeadersTable(all, 10);
 
@@ -3090,11 +3460,12 @@ function renderAnalysis() {
     const recipe = winnerRecipe(scannedRows, analyses);
     $("winnerRecipe").innerHTML = recipe.html;
   } else {
-    const empty =
-      '<div class="analysis-empty">Scan creatives to classify themes, angles, formats, hooks, presenters, awareness, and feelings.</div>';
-    $("conceptBreakdown").innerHTML = empty;
-    $("colorTheoryBreakdown").innerHTML = empty;
-    $("winnerRecipe").innerHTML = empty;
+    $("conceptBreakdown").innerHTML =
+      `<p class="analysis-fallback-note">Using creative names and ad metadata. Scan creatives to add visual themes, angles, presenters, and color theory.</p>` +
+      metadataConceptBreakdown(all);
+    $("colorTheoryBreakdown").innerHTML =
+      '<div class="analysis-empty">Visual color analysis requires a creative scan. Metadata concept analysis remains available above.</div>';
+    $("winnerRecipe").innerHTML = metadataWinnerRecipe(all);
   }
   $("videoFunnel").innerHTML = accountVideoPanel();
   $("detailedDataView").innerHTML = detailedDataTable(all, analyses);
@@ -3123,6 +3494,9 @@ async function loadAnalysis() {
 }
 
 async function loadFatigue(params = currentRangeParams()) {
+  const loadingKey = params.toString();
+  if (state.fatigueLoadingKey === loadingKey) return;
+  state.fatigueLoadingKey = loadingKey;
   const requestId = ++state.fatigueRequest;
   const expectedRange = state.payload?.range;
   state.fatigueError = null;
@@ -3139,13 +3513,22 @@ async function loadFatigue(params = currentRangeParams()) {
       return;
     }
     state.fatigue = data;
-    if (state.analysisReport === "fatigue") {
+    if (state.analysis) renderAnalysis();
+    else if (["fatigue", "brief"].includes(state.analysisReport)) {
       renderAnalysisReport();
     }
   } catch (error) {
     if (requestId !== state.fatigueRequest) return;
     state.fatigueError = error.message;
-    if (state.analysisReport === "fatigue") renderAnalysisReport();
+    if (state.analysis) renderAnalysis();
+    else if (["fatigue", "brief"].includes(state.analysisReport)) {
+      renderAnalysisReport();
+    }
+  } finally {
+    state.fatigueTimer = null;
+    if (state.fatigueLoadingKey === loadingKey) {
+      state.fatigueLoadingKey = null;
+    }
   }
 }
 
@@ -5248,6 +5631,8 @@ if (
     "copy",
     "retention",
     "fatigue",
+    "budget",
+    "brief",
     "landing",
     "data",
   ].includes(initialReport)

@@ -186,7 +186,7 @@ select:focus, input:focus { border-color: var(--accent); }
 .analysis-report-nav { display: flex; gap: 3px; margin: -4px 0 14px; padding-bottom: 8px; overflow-x: auto; border-bottom: 1px solid #dfe4ea; }
 .analysis-report-nav button { flex: 0 0 auto; border: 0; border-radius: 6px; padding: 7px 10px; background: transparent; color: #64707c; font-size: 10px; }
 .analysis-report-nav button.active { background: #e5edfb; color: #185ecb; font-weight: 750; }
-.analysis-summary { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; margin-bottom: 12px; }
+.analysis-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px,1fr)); gap: 10px; margin-bottom: 12px; }
 .analysis-kpi { min-height: 102px; padding: 14px; border: 1px solid #dfe4ea; border-radius: 10px; background: white; }
 .analysis-kpi.primary { background: #162131; border-color: #162131; color: white; }
 .analysis-kpi span { display: block; color: #77818c; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
@@ -217,6 +217,8 @@ select:focus, input:focus { border-color: var(--accent); }
 .concept-dimensions { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
 .concept-dimension { padding: 11px; border: 1px solid #e3e7ec; border-radius: 8px; }
 .concept-dimension h4 { margin: 0 0 10px; font-size: 10px; text-transform: uppercase; }
+.concept-dimension h4 small { color: #7c8791; font-size: 7px; font-weight: 500; text-transform: none; }
+.analysis-fallback-note { margin: 0 0 10px; color: #68727d; font-size: 10px; }
 .concept-row { margin: 11px 0; font-size: 9px; }
 .concept-row-main { display: grid; grid-template-columns: minmax(80px,1fr) 1.4fr 52px; gap: 8px; align-items: center; }
 .concept-row-main > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -255,6 +257,24 @@ select:focus, input:focus { border-color: var(--accent); }
 .fatigue-status.watch, .readiness-status.low-sample { background: #fdf1de; color: #9a5d0c; }
 .fatigue-status.stable, .readiness-status.ready { background: #e3f6ec; color: #18724f; }
 .fatigue-status.insufficient, .readiness-status.collecting { background: #f1f3f5; color: #64707b; }
+.budget-action { display: inline-block; border-radius: 999px; padding: 3px 7px; font-size: 8px; font-weight: 800; }
+.budget-action.increase { background: #e3f6ec; color: #18724f; }
+.budget-action.reduce { background: #fde8e6; color: #a23a31; }
+.budget-action.hold { background: #f1f3f5; color: #64707b; }
+.weekly-brief { color: #202a34; }
+.weekly-brief > header { display: flex; justify-content: space-between; gap: 20px; align-items: start; padding-bottom: 14px; border-bottom: 2px solid #202a34; }
+.weekly-brief h2 { margin: 2px 0 4px; font-size: 25px; }
+.weekly-brief header span, .weekly-brief footer { color: #6d7781; font-size: 9px; }
+.weekly-brief-kpis { display: grid; grid-template-columns: repeat(6, minmax(90px,1fr)); gap: 8px; margin: 16px 0; }
+.weekly-brief-kpis > div { padding: 11px; border: 1px solid #dfe4ea; border-radius: 8px; background: white; }
+.weekly-brief-kpis span { display: block; color: #75808b; font-size: 8px; text-transform: uppercase; }
+.weekly-brief-kpis strong { display: block; margin-top: 3px; font-size: 16px; }
+.weekly-brief-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.weekly-brief-grid section { break-inside: avoid; padding: 14px; border: 1px solid #dfe4ea; border-radius: 9px; background: white; }
+.weekly-brief-grid h3 { margin: 0 0 9px; font-size: 13px; }
+.weekly-brief-grid ol { margin: 0; padding-left: 20px; }
+.weekly-brief-grid li, .weekly-brief-grid p { margin: 5px 0; font-size: 10px; line-height: 1.4; }
+.weekly-brief footer { margin-top: 14px; padding-top: 10px; border-top: 1px solid #dfe4ea; }
 .trend-positive { color: #18724f; font-weight: 750; }
 .trend-negative { color: #b54a42; font-weight: 750; }
 .lineage-row { cursor: pointer; }
@@ -614,6 +634,8 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .detail-left { display: none; }
   .overview-grid, .performance-panels, .insights-grid { grid-template-columns: 1fr; }
   .analysis-summary, .analysis-columns, .concept-dimensions, .recipe-grid, .inspiration-grid, .library-links { grid-template-columns: 1fr 1fr; }
+  .weekly-brief-kpis { grid-template-columns: repeat(3, minmax(90px,1fr)); }
+  .weekly-brief-grid { grid-template-columns: 1fr; }
   .debrief-action-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .debrief-summary-bar { grid-template-columns: repeat(4, minmax(80px,1fr)); }
   .debrief-period-comparison { grid-template-columns: repeat(2, minmax(100px,1fr)); }
@@ -633,9 +655,41 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .summary-item { border-bottom: 1px solid var(--border-soft); }
   .topbar { min-height: 70px; }
   .analysis-summary, .analysis-columns, .concept-dimensions, .recipe-grid, .inspiration-grid, .library-links { grid-template-columns: 1fr; }
+  .weekly-brief-kpis { grid-template-columns: repeat(2, minmax(90px,1fr)); }
   .debrief-action-summary { grid-template-columns: 1fr; }
   .debrief-summary-bar { grid-template-columns: repeat(2, minmax(80px,1fr)); }
   .debrief-inline-controls { align-items: stretch; flex-direction: column; }
   .learning-cpsu-summary { grid-template-columns: 1fr; }
   .fatigue-summary { grid-template-columns: 1fr; }
+}
+
+@media print {
+  body { background: white; }
+  body.printing-weekly-brief .sidebar,
+  body.printing-weekly-brief .topbar,
+  body.printing-weekly-brief .tabs,
+  body.printing-weekly-brief .data-health-banner,
+  body.printing-weekly-brief .analysis-toolbar,
+  body.printing-weekly-brief .analysis-report-nav,
+  body.printing-weekly-brief #analysisOverview,
+  body.printing-weekly-brief #libraryPage,
+  body.printing-weekly-brief #inspirationPage,
+  body.printing-weekly-brief #debriefPage,
+  body.printing-weekly-brief #scanProgress,
+  body.printing-weekly-brief #printWeeklyBrief {
+    display: none !important;
+  }
+  body.printing-weekly-brief .app-shell { display: block; }
+  body.printing-weekly-brief main { max-width: none; padding: 0; }
+  body.printing-weekly-brief #analysisPage,
+  body.printing-weekly-brief #analysisReportView {
+    display: block !important;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    box-shadow: none;
+  }
+  .weekly-brief-grid { grid-template-columns: 1fr 1fr; }
+  .weekly-brief-kpis { grid-template-columns: repeat(6, 1fr); }
 }
