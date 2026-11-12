@@ -2838,217 +2838,112 @@ function renderDebriefAll() {
 
 function renderDebriefLearnings() {
   if (!state.debrief) return;
-  const visual = state.debrief.visualLearnings;
-  const hasLearnings =
-    visual?.winningPatterns?.length ||
-    visual?.losingPatterns?.length ||
-    visual?.strengths?.length ||
-    visual?.risks?.length;
-  if (!visual || !hasLearnings) {
-    $("debriefVisualCoverage").textContent =
-      "No debrief creatives have visual-QA scans yet. Use Ad Analysis → Scan creatives to generate broader learnings.";
-    $("debriefLearnings").innerHTML =
-      '<div class="analysis-empty">Visual learnings will appear after creatives are scanned.</div>';
-    return;
-  }
-  $("debriefVisualCoverage").textContent = visual.coverage.scanned
-    ? `${integer(visual.coverage.scanned)} of ${integer(visual.coverage.total)} tested creatives have visual-QA coverage. Patterns combine visual scans and performance metadata.`
-    : "Visual-QA scans are not persisted on this service yet, so these patterns use creative source, format, OS, category and creator metadata. Scan creatives to add hooks, themes and color learnings.";
-  const patternPanel = (title, patterns, tone) => `
-    <section class="debrief-learning-panel ${tone}">
-      <h3>${title}</h3>
-      ${
-        patterns.length
-          ? patterns
-              .map(
-                (pattern) => `<div class="debrief-pattern-row">
-                  <span>${escapeHtml(pattern.dimension)}</span>
-                  <strong>${escapeHtml(pattern.value)}</strong>
-                  <small>${integer(pattern.creatives)} creative${pattern.creatives === 1 ? "" : "s"} · ${money(pattern.testingSpend, true)} testing spend</small>
-                </div>`,
-              )
-              .join("")
-          : '<div class="analysis-empty">Not enough separated outcomes yet.</div>'
-      }
-    </section>`;
-  const notesPanel = (title, notes, tone) => `
-    <section class="debrief-learning-panel ${tone}">
-      <h3>${title}</h3>
-      ${
-        notes.length
-          ? `<ul>${notes.map((note) => `<li>${escapeHtml(note)}</li>`).join("")}</ul>`
-          : '<div class="analysis-empty">No repeated notes yet.</div>'
-      }
-    </section>`;
   const launched = state.debrief.all.filter(
     (row) =>
       row.uploadedDate &&
       row.uploadedDate >= state.debrief.range.since &&
       row.uploadedDate <= state.debrief.range.until,
   );
-  const rollups = (dimension, valueFor) => {
-    const groups = new Map();
-    for (const row of launched) {
-      const value = valueFor(row) || "Unknown";
-      const group = groups.get(value) || [];
-      group.push(row);
-      groups.set(value, group);
-    }
-    return [...groups.entries()]
-      .map(([value, creatives]) => {
-        const sum = (key) =>
-          creatives.reduce(
-            (total, row) => total + Number(row.testing?.[key] || 0),
-            0,
-          );
-        const retention = (day) => {
-          const cohort = sum(`d${day}Cohort`);
-          return cohort > 0
-            ? (sum(`retainedD${day}`) / cohort) * 100
-            : null;
-        };
-        const spend = sum("spend");
-        const signups = sum("signups");
-        const winners = creatives.filter(
-          (row) => row.verdict === "Winner",
-        ).length;
-        return {
-          dimension,
-          value,
-          tested: creatives.length,
-          winners,
-          winRate: creatives.length > 0
-            ? (winners / creatives.length) * 100
-            : 0,
-          testingSpend: spend,
-          signups,
-          cpsu: signups > 0 ? spend / signups : null,
-          d1: retention(1),
-          d3: retention(3),
-          d7: retention(7),
-        };
-      })
-      .sort(
-        (a, b) =>
-          b.testingSpend - a.testingSpend ||
-          b.tested - a.tested,
-      );
-  };
-  const learningTable = (title, rows, limit = 15) => `
-    <section class="debrief-learning-panel learning-table-panel">
-      <h3>${title}</h3>
-      <div class="data-table-wrap retention-table-wrap">
-        <table class="analysis-data-table debrief-table">
-          <thead><tr><th>Dimension</th><th class="sticky-cell">Value</th><th>Tested</th><th>Winners</th><th>Win rate</th><th>Testing spend</th><th>CPSU</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
-          <tbody>${rows
-            .slice(0, limit)
-            .map(
-              (row) => `<tr>
-                <td>${escapeHtml(row.dimension)}</td>
-                <td class="sticky-cell"><strong>${escapeHtml(row.value)}</strong></td>
-                <td>${integer(row.tested)}</td>
-                <td>${integer(row.winners)}</td>
-                <td>${pct(row.winRate)}</td>
-                <td>${money(row.testingSpend, true)}</td>
-                <td>${debriefMoney(row.cpsu)}</td>
-                <td>${debriefPct(row.d1)}</td>
-                <td>${debriefPct(row.d3)}</td>
-                <td>${debriefPct(row.d7)}</td>
-              </tr>`,
-            )
-            .join("")}</tbody>
-        </table>
-      </div>
-    </section>`;
-  const conceptRollups = rollups(
-    "Concept",
-    (row) => row.testingAdSets?.[0] || row.category,
-  );
-  const cpsuBenchmark =
-    state.debrief.typical?.cpsu ??
-    state.debrief.benchmarks?.average?.cpsu ??
-    null;
-  const assessedConcepts = conceptRollups
-    .map((row) => {
-      const assessment =
-        row.testingSpend < 100
-          ? "Needs spend"
-          : row.signups === 0 || row.cpsu === null
-            ? "No sign-ups"
-            : cpsuBenchmark !== null && row.cpsu > cpsuBenchmark
-              ? "High CPSU"
-              : "Efficient";
-      return { ...row, assessment };
-    })
-    .sort((a, b) => {
-      const priority = {
-        "No sign-ups": 0,
-        "High CPSU": 1,
-        "Needs spend": 2,
-        Efficient: 3,
+  const dimension = $("debriefLearningDimension").value;
+  const valueFor = {
+    format: (row) => row.format,
+    source: (row) => row.source,
+    os: (row) => row.os,
+    concept: (row) => row.testingAdSets?.[0] || row.category,
+  }[dimension];
+  const groups = new Map();
+  for (const row of launched) {
+    const value = valueFor(row) || "Unknown";
+    const group = groups.get(value) || [];
+    group.push(row);
+    groups.set(value, group);
+  }
+  const rollups = [...groups.entries()]
+    .map(([value, creatives]) => {
+      const sum = (key) =>
+        creatives.reduce(
+          (total, row) => total + Number(row.testing?.[key] || 0),
+          0,
+        );
+      const retention = (day) => {
+        const cohort = sum(`d${day}Cohort`);
+        return cohort > 0
+          ? (sum(`retainedD${day}`) / cohort) * 100
+          : null;
       };
-      return (
-        priority[a.assessment] - priority[b.assessment] ||
-        b.testingSpend - a.testingSpend
-      );
-    });
-  const assessmentCounts = Object.fromEntries(
-    ["Efficient", "High CPSU", "No sign-ups", "Needs spend"].map(
-      (assessment) => [
-        assessment,
-        assessedConcepts.filter((row) => row.assessment === assessment).length,
-      ],
-    ),
+      const winners = creatives.filter(
+        (row) => row.verdict === "Winner",
+      ).length;
+      const losers = creatives.filter(
+        (row) => row.verdict === "Loser",
+      ).length;
+      const middle = creatives.filter(
+        (row) => row.verdict === "Middle",
+      ).length;
+      const learning = creatives.filter(
+        (row) => row.verdict === "Learning",
+      ).length;
+      const decided = winners + losers + middle;
+      const testingSpend = sum("spend");
+      const signups = sum("signups");
+      return {
+        value,
+        tested: creatives.length,
+        decided,
+        winners,
+        losers,
+        middle,
+        learning,
+        winRate: decided > 0 ? (winners / decided) * 100 : null,
+        testingSpend,
+        signups,
+        cpsu: signups > 0 ? testingSpend / signups : null,
+        d1: retention(1),
+        d3: retention(3),
+        d7: retention(7),
+      };
+    })
+    .sort(
+      (a, b) =>
+        (b.winRate ?? -1) - (a.winRate ?? -1) ||
+        b.decided - a.decided ||
+        b.testingSpend - a.testingSpend,
+    );
+  const decidedTotal = rollups.reduce(
+    (sum, row) => sum + row.decided,
+    0,
   );
-  const conceptLearningTable = `
-    <section class="debrief-learning-panel learning-table-panel">
-      <div class="learning-cpsu-heading">
-        <h3>Concept CPSU learnings</h3>
-        <span>$100+ evidence floor · ${debriefMoney(cpsuBenchmark)} testing CPSU benchmark</span>
-      </div>
-      <div class="learning-cpsu-summary">
-        ${["Efficient", "High CPSU", "No sign-ups", "Needs spend"]
-          .map(
-            (assessment) =>
-              `<div class="assessment-${assessment.toLowerCase().replaceAll(" ", "-")}"><span>${assessment}</span><strong>${integer(assessmentCounts[assessment])}</strong></div>`,
-          )
-          .join("")}
-      </div>
-      <div class="data-table-wrap retention-table-wrap">
-        <table class="analysis-data-table debrief-table">
-          <thead><tr><th class="sticky-cell">Concept</th><th>Assessment</th><th>Tested</th><th>Testing spend</th><th>Sign-ups</th><th>CPSU</th><th>vs benchmark</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
-          <tbody>${assessedConcepts
-            .slice(0, 25)
-            .map(
-              (row) => `<tr>
-                <td class="sticky-cell"><strong>${escapeHtml(row.value)}</strong></td>
-                <td><span class="learning-assessment assessment-${row.assessment.toLowerCase().replaceAll(" ", "-")}">${row.assessment}</span></td>
-                <td>${integer(row.tested)}</td>
-                <td>${money(row.testingSpend)}</td>
-                <td>${integer(row.signups)}</td>
-                <td>${debriefMoney(row.cpsu)}</td>
-                <td>${row.cpsu !== null && cpsuBenchmark ? `${((row.cpsu / cpsuBenchmark - 1) * 100).toFixed(0)}%` : "—"}</td>
-                <td>${debriefPct(row.d1)}</td>
-                <td>${debriefPct(row.d3)}</td>
-                <td>${debriefPct(row.d7)}</td>
-              </tr>`,
-            )
-            .join("")}</tbody>
-        </table>
-      </div>
-    </section>`;
-  const comparisonRollups = [
-    ...rollups("Source", (row) => row.source),
-    ...rollups("Format", (row) => row.format),
-    ...rollups("OS", (row) => row.os),
-  ];
-  $("debriefLearnings").innerHTML =
-    conceptLearningTable +
-    learningTable("Source · format · OS performance", comparisonRollups, 30) +
-    patternPanel("Patterns among winners", visual.winningPatterns, "positive") +
-    patternPanel("Patterns among losers", visual.losingPatterns, "negative") +
-    notesPanel("Observed strengths", visual.strengths, "positive") +
-    notesPanel("Observed risks", visual.risks, "negative");
+  const winnersTotal = rollups.reduce(
+    (sum, row) => sum + row.winners,
+    0,
+  );
+  $("debriefVisualCoverage").textContent =
+    `${integer(launched.length)} creatives launched · ${integer(decidedTotal)} decided · ${integer(launched.length - decidedTotal)} still learning · overall win rate ${decidedTotal > 0 ? pct((winnersTotal / decidedTotal) * 100) : "—"}.`;
+  $("debriefLearnings").innerHTML = rollups.length
+    ? `<table class="analysis-data-table debrief-table win-rate-table">
+      <thead><tr><th class="sticky-cell">${dimension === "concept" ? "Concept / ad group" : dimension.charAt(0).toUpperCase() + dimension.slice(1)}</th><th>Tested</th><th>Decided</th><th>Winners</th><th>Losers</th><th>Middle</th><th>Learning</th><th>Win rate</th><th>Testing spend</th><th>Sign-ups</th><th>CPSU</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
+      <tbody>${rollups
+        .map(
+          (row) => `<tr>
+            <td class="sticky-cell"><strong>${escapeHtml(row.value)}</strong></td>
+            <td>${integer(row.tested)}</td>
+            <td>${integer(row.decided)}</td>
+            <td>${integer(row.winners)}</td>
+            <td>${integer(row.losers)}</td>
+            <td>${integer(row.middle)}</td>
+            <td>${integer(row.learning)}</td>
+            <td><strong>${debriefPct(row.winRate)}</strong></td>
+            <td>${money(row.testingSpend, true)}</td>
+            <td>${integer(row.signups)}</td>
+            <td>${debriefMoney(row.cpsu)}</td>
+            <td>${debriefPct(row.d1)}</td>
+            <td>${debriefPct(row.d3)}</td>
+            <td>${debriefPct(row.d7)}</td>
+          </tr>`,
+        )
+        .join("")}</tbody>
+    </table>`
+    : '<div class="analysis-empty">No creatives were launched in this period.</div>';
 }
 
 function setDebriefSection(section) {
@@ -3384,6 +3279,10 @@ document.querySelectorAll("[data-debrief-section]").forEach((button) => {
     setDebriefSection(button.dataset.debriefSection),
   );
 });
+$("debriefLearningDimension").addEventListener(
+  "change",
+  renderDebriefLearnings,
+);
 ["debriefTestedVerdict", "debriefTestedSort"].forEach((id) => {
   $(id).addEventListener("change", () => {
     state.debriefTestedPageNumber = 1;

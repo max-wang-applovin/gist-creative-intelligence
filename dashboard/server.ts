@@ -1140,10 +1140,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
         range,
         url.searchParams.get("refresh") === "1",
       );
-      json(res, 200, {
-        ...debrief,
-        visualLearnings: await buildDebriefVisualLearnings(debrief),
-      });
+      json(res, 200, debrief);
     } catch (error) {
       json(res, 400, {
         error: error instanceof Error ? error.message : String(error),

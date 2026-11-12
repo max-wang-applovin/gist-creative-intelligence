@@ -312,9 +312,20 @@
               </div>
             </section>
             <section id="debriefSectionLearnings" class="analysis-card debrief-card hidden" data-debrief-section-panel="learnings">
-              <div class="analysis-card-title">Broader creative learnings · visual QA</div>
+              <div class="debrief-section-heading">
+                <div>
+                  <div class="analysis-card-title">Creative win-rate comparison</div>
+                  <p class="debrief-rule">Win rate = winners ÷ decided creatives. Still-learning creatives are excluded from the denominator.</p>
+                </div>
+                <label><span>Compare by</span><select id="debriefLearningDimension">
+                  <option value="format">Format</option>
+                  <option value="source">Source</option>
+                  <option value="os">OS</option>
+                  <option value="concept">Concept / ad group</option>
+                </select></label>
+              </div>
               <p id="debriefVisualCoverage" class="debrief-rule"></p>
-              <div id="debriefLearnings" class="debrief-learning-grid"></div>
+              <div id="debriefLearnings" class="data-table-wrap debrief-table-wrap"></div>
             </section>
             <section id="debriefSectionScaled" class="analysis-card debrief-card hidden" data-debrief-section-panel="scaled">
               <div class="analysis-card-title">Scale candidates · ready to push</div>
