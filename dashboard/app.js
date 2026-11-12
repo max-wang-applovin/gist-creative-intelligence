@@ -3157,7 +3157,7 @@ function renderWeeklyBrief(rows) {
   return `<div class="weekly-brief">
     <header>
       <div><p class="eyebrow">CREATIVE INTELLIGENCE</p><h2>Weekly Creative Brief</h2><span>${state.payload.range.since} → ${state.payload.range.until} · generated ${new Date().toLocaleString()}</span></div>
-      <button id="printWeeklyBrief" class="analysis-primary" type="button" ${!state.fatigue && !state.fatigueError ? "disabled" : ""}>${!state.fatigue && !state.fatigueError ? "Preparing fatigue…" : "Print / Save PDF"}</button>
+      <button id="printWeeklyBrief" class="analysis-primary" type="button">Print / Save PDF${!state.fatigue && !state.fatigueError ? " · fatigue pending" : ""}</button>
     </header>
     <div class="weekly-brief-kpis">
       <div><span>Spend</span><strong>${money(state.payload.totals.spend, true)}</strong></div>
