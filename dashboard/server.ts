@@ -681,16 +681,6 @@ async function buildPayload(
   range: { since: string; until: string },
   force = false,
 ): Promise<DashboardPayload> {
-  if (force) {
-    const value = await refreshPayload(range, true);
-    return withPayloadFreshness(
-      value,
-      "live",
-      false,
-      dataCache.get(`${range.since}:${range.until}`)?.expiresAt ??
-        Date.now() + DASHBOARD_CACHE_TTL_MS,
-    );
-  }
   const key = `${range.since}:${range.until}`;
   let source: PayloadFreshness["source"] = "memory";
   let cached = dataCache.get(key);
@@ -708,6 +698,19 @@ async function buildPayload(
       dataCache.set(key, cached);
     }
   }
+  if (force && cached) {
+    void refreshPayload(range, true).catch((error: unknown) => {
+      process.stderr.write(
+        `Forced dashboard refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    });
+    return withPayloadFreshness(
+      cached.value,
+      source,
+      true,
+      cached.expiresAt,
+    );
+  }
   if (cached) {
     const stale = cached.expiresAt <= Date.now();
     if (stale) {
@@ -724,7 +727,7 @@ async function buildPayload(
       cached.expiresAt,
     );
   }
-  const value = await refreshPayload(range);
+  const value = await refreshPayload(range, force);
   return withPayloadFreshness(
     value,
     "live",
@@ -746,10 +749,10 @@ async function refreshMediaPayload(
     const metricsAreRecent =
       currentMetrics &&
       Date.now() - Date.parse(currentMetrics.generatedAt) < 60_000;
-    const dashboard = await buildPayload(
-      range,
-      force && !metricsAreRecent,
-    );
+    const dashboard =
+      force && !metricsAreRecent
+        ? await refreshPayload(range, true)
+        : await buildPayload(range);
     const adIds = [
       ...new Set(dashboard.creatives.flatMap((creative) => creative.adIds)),
     ];
@@ -940,16 +943,6 @@ async function buildMediaPayload(
   range: { since: string; until: string },
   force = false,
 ): Promise<MediaPayload> {
-  if (force) {
-    const value = await refreshMediaPayload(range, true);
-    return withPayloadFreshness(
-      value,
-      "live",
-      false,
-      mediaCache.get(`${range.since}:${range.until}`)?.expiresAt ??
-        Date.now() + MEDIA_CACHE_TTL_MS,
-    );
-  }
   const key = `${range.since}:${range.until}`;
   let source: PayloadFreshness["source"] = "memory";
   let cached = mediaCache.get(key);
@@ -963,6 +956,19 @@ async function buildMediaPayload(
       };
       mediaCache.set(key, cached);
     }
+  }
+  if (force && cached) {
+    void refreshMediaPayload(range, true).catch((error: unknown) => {
+      process.stderr.write(
+        `Forced dashboard media refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    });
+    return withPayloadFreshness(
+      cached.value,
+      source,
+      true,
+      cached.expiresAt,
+    );
   }
   if (cached) {
     const stale = cached.expiresAt <= Date.now();
@@ -980,7 +986,7 @@ async function buildMediaPayload(
       cached.expiresAt,
     );
   }
-  const value = await refreshMediaPayload(range);
+  const value = await refreshMediaPayload(range, force);
   return withPayloadFreshness(
     value,
     "live",
