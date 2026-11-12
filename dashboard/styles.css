@@ -173,8 +173,11 @@ select:focus, input:focus { border-color: var(--accent); }
 .analysis-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 16px; }
 .analysis-toolbar h2 { margin: 0; font-size: 22px; letter-spacing: -.03em; }
 .analysis-toolbar p:not(.eyebrow) { margin: 4px 0 0; color: #68727d; font-size: 11px; }
-.scan-controls { display: flex; gap: 8px; align-items: center; }
+.scan-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .scan-controls select { background: white; color: #222a32; border-color: #d9dee4; }
+.analysis-date-control { color: #68727d; }
+.analysis-date-control select { min-width: 145px; }
+#analysisCustomDates input { width: 132px; }
 .analysis-primary { min-height: 38px; border: 0; border-radius: 7px; padding: 0 14px; background: #2167ea; color: white; font-weight: 700; }
 .analysis-primary:disabled { opacity: .5; cursor: wait; }
 .analysis-secondary { min-height: 38px; border: 1px solid #d5dbe2; border-radius: 7px; padding: 0 12px; background: white; color: #37424d; }

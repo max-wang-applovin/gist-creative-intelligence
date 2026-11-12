@@ -164,6 +164,22 @@
               <p id="analysisCoverage">Loading scan coverage…</p>
             </div>
             <div class="scan-controls">
+              <label class="analysis-date-control">
+                <span>Date window</span>
+                <select id="analysisDatePreset">
+                  <option value="7">Last 7 days</option>
+                  <option value="14">Last 14 days</option>
+                  <option value="28">Last 28 days</option>
+                  <option value="30" selected>Last 30 days</option>
+                  <option value="90">Last 90 days</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <div id="analysisCustomDates" class="custom-dates hidden">
+                <label><span>From</span><input id="analysisSinceDate" type="date" /></label>
+                <label><span>To</span><input id="analysisUntilDate" type="date" /></label>
+                <button id="applyAnalysisDates" class="analysis-secondary" type="button">Apply dates</button>
+              </div>
               <select id="scanLimit" aria-label="Number of creatives to scan">
                 <option value="5">Top 5</option>
                 <option value="20" selected>Top 20</option>

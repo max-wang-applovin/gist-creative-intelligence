@@ -1660,6 +1660,46 @@ function currentRangeParams(force = false) {
   return params;
 }
 
+function completeDateRange(days) {
+  const until = new Date();
+  until.setUTCHours(0, 0, 0, 0);
+  until.setUTCDate(until.getUTCDate() - 1);
+  const since = new Date(until);
+  since.setUTCDate(since.getUTCDate() - (days - 1));
+  return {
+    since: since.toISOString().slice(0, 10),
+    until: until.toISOString().slice(0, 10),
+  };
+}
+
+function selectedAnalysisRange() {
+  const preset = $("analysisDatePreset").value;
+  return preset === "custom"
+    ? {
+        since: $("analysisSinceDate").value,
+        until: $("analysisUntilDate").value,
+      }
+    : completeDateRange(Number(preset));
+}
+
+function payloadMatchesAnalysisRange() {
+  const range = selectedAnalysisRange();
+  return (
+    state.payload?.range.since === range.since &&
+    state.payload?.range.until === range.until
+  );
+}
+
+function syncLibraryRangeFromAnalysis() {
+  const preset = $("analysisDatePreset").value;
+  $("datePreset").value = preset;
+  $("customDates").classList.toggle("hidden", preset !== "custom");
+  if (preset === "custom") {
+    $("sinceDate").value = $("analysisSinceDate").value;
+    $("untilDate").value = $("analysisUntilDate").value;
+  }
+}
+
 function appendOption(select, value, label) {
   const option = document.createElement("option");
   option.value = value;
@@ -4631,15 +4671,16 @@ async function switchPage(page) {
   });
   if (page === "library" && !state.payload) void loadData();
   if (page === "analysis") {
-    if (state.payload) {
+    syncLibraryRangeFromAnalysis();
+    if (!payloadMatchesAnalysisRange()) {
+      void loadData();
+    } else {
       void loadAnalysis();
       void loadAllMedia();
       if (!state.videoMetrics) void loadVideoMetrics();
       if (state.analysisReport === "fatigue" && !state.fatigue) {
         void loadFatigue();
       }
-    } else {
-      void loadData();
     }
   }
   if (page === "inspiration") void loadCompetitors();
@@ -4754,6 +4795,29 @@ $("datePreset").addEventListener("change", () => {
 });
 $("applyDates").addEventListener("click", () => void loadData());
 $("refreshButton").addEventListener("click", () => void loadData(true));
+$("analysisDatePreset").addEventListener("change", () => {
+  const custom = $("analysisDatePreset").value === "custom";
+  $("analysisCustomDates").classList.toggle("hidden", !custom);
+  if (custom) {
+    const range = state.payload?.range || completeDateRange(30);
+    $("analysisSinceDate").value = range.since;
+    $("analysisUntilDate").value = range.until;
+    return;
+  }
+  syncLibraryRangeFromAnalysis();
+  void loadData();
+});
+$("applyAnalysisDates").addEventListener("click", () => {
+  if (
+    !$("analysisSinceDate").value ||
+    !$("analysisUntilDate").value
+  ) {
+    window.alert("Choose both analysis dates.");
+    return;
+  }
+  syncLibraryRangeFromAnalysis();
+  void loadData();
+});
 $("exportCsvButton").addEventListener("click", exportFilteredCsv);
 $("saveViewButton").addEventListener("click", () =>
   void saveCurrentView().catch((error) => window.alert(error.message)),
@@ -5057,6 +5121,22 @@ if (initialQuery.get("since") && initialQuery.get("until")) {
   $("sinceDate").value = initialQuery.get("since");
   $("untilDate").value = initialQuery.get("until");
   $("customDates").classList.remove("hidden");
+}
+if (initialPage === "analysis") {
+  if (
+    initialDays &&
+    [...$("analysisDatePreset").options].some(
+      (option) => option.value === initialDays,
+    )
+  ) {
+    $("analysisDatePreset").value = initialDays;
+  }
+  if (initialQuery.get("since") && initialQuery.get("until")) {
+    $("analysisDatePreset").value = "custom";
+    $("analysisSinceDate").value = initialQuery.get("since");
+    $("analysisUntilDate").value = initialQuery.get("until");
+    $("analysisCustomDates").classList.remove("hidden");
+  }
 }
 for (const [parameter, id] of [
   ["sort", "sortMetric"],
