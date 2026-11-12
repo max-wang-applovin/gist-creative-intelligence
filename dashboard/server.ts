@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -564,6 +564,33 @@ function text(
   res.end(value);
 }
 
+function staticText(
+  req: IncomingMessage,
+  res: ServerResponse,
+  value: string,
+  contentType: string,
+): void {
+  const etag = `"${createHash("sha256")
+    .update(value)
+    .digest("base64url")
+    .slice(0, 24)}"`;
+  const headers = {
+    etag,
+    "cache-control": "private, max-age=0, must-revalidate",
+    "x-content-type-options": "nosniff",
+  };
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+  res.writeHead(200, {
+    ...headers,
+    "content-type": contentType,
+  });
+  res.end(value);
+}
+
 function equalCredential(actual: string, expected: string): boolean {
   const actualBytes = Buffer.from(actual);
   const expectedBytes = Buffer.from(expected);
@@ -836,6 +863,7 @@ async function refreshMediaPayload(
           const cached = adMediaStore.get(adId);
           return (
             !cached ||
+            !cached.media.cardThumbnailUrl ||
             cached.savedAt + AD_MEDIA_CACHE_TTL_MS <= now
           );
         });
@@ -2817,9 +2845,9 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   }[url.pathname] as "core" | "analysis" | "debrief" | undefined;
   if (bundle) {
     try {
-      text(
+      staticText(
+        req,
         res,
-        200,
         await appBundle(bundle),
         "text/javascript; charset=utf-8",
       );
@@ -2840,7 +2868,12 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     return;
   }
   try {
-    text(res, 200, await readFile(join(here, asset.file), "utf8"), asset.type);
+    staticText(
+      req,
+      res,
+      await readFile(join(here, asset.file), "utf8"),
+      asset.type,
+    );
   } catch {
     text(res, 500, "Dashboard asset unavailable", "text/plain; charset=utf-8");
   }

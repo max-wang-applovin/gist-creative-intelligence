@@ -14,6 +14,7 @@ export type MetaAdMedia = {
   destinationUrl: string | null;
   callToActionType: string | null;
   mediaType: "video" | "image" | "unknown";
+  cardThumbnailUrl: string | null;
   thumbnailUrl: string | null;
   thumbnailWidth: number | null;
   thumbnailHeight: number | null;
@@ -148,6 +149,7 @@ export async function fetchMetaAdMedia(
           null,
         callToActionType: creative?.call_to_action_type ?? null,
         mediaType: videoId ? "video" : thumbnailUrl ? "image" : "unknown",
+        cardThumbnailUrl: thumbnailUrl,
         thumbnailUrl,
         thumbnailWidth: null,
         thumbnailHeight: null,

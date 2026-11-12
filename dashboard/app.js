@@ -11,6 +11,7 @@ const state = {
   mediaPollTimer: null,
   mediaFreshness: null,
   mediaLoadedIds: new Set(),
+  mediaLoadingIds: new Set(),
   mediaAllLoaded: false,
   mediaAllPromise: null,
   visibleCards: 60,
@@ -122,6 +123,10 @@ function safeUrl(value) {
   } catch {
     return "";
   }
+}
+
+function cardThumbnail(media) {
+  return safeUrl(media?.cardThumbnailUrl || media?.thumbnailUrl);
 }
 
 function primaryMetric(row) {
@@ -250,7 +255,7 @@ function mediaMarkup(row, index) {
     const pending = state.payload?.dataHealth?.status === "loading";
     return `<div class="media-frame"><div class="media-empty">${pending ? "Loading preview…" : "No Meta preview<br>for this grouping"}</div></div>`;
   }
-  const thumbnail = safeUrl(media.thumbnailUrl);
+  const thumbnail = cardThumbnail(media);
   const directVideo = safeUrl(media.videoUrl);
   const image = thumbnail
     ? `<img loading="${index < 8 ? "eager" : "lazy"}" src="${escapeHtml(thumbnail)}" alt="${escapeHtml(row.creativeName)}" />`
@@ -439,7 +444,7 @@ function openComparison() {
         <table class="compare-table">
           <thead><tr><th>Metric</th>${rows
             .map((row) => {
-              const thumb = safeUrl(row.media[0]?.thumbnailUrl);
+              const thumb = cardThumbnail(row.media[0]);
               return `<th>${thumb ? `<img src="${escapeHtml(thumb)}" alt="" />` : ""}<strong>${escapeHtml(row.creativeName)}</strong></th>`;
             })
             .join("")}</tr></thead>
@@ -1855,7 +1860,9 @@ async function loadMedia(
   const requestedIds = [
     ...new Set(
       creativeIds.filter(
-        (creativeId) => !state.mediaLoadedIds.has(creativeId),
+        (creativeId) =>
+          !state.mediaLoadedIds.has(creativeId) &&
+          !state.mediaLoadingIds.has(creativeId),
       ),
     ),
   ].slice(0, 100);
@@ -1863,6 +1870,9 @@ async function loadMedia(
     $("mediaType").disabled = false;
     return;
   }
+  requestedIds.forEach((creativeId) =>
+    state.mediaLoadingIds.add(creativeId),
+  );
   try {
     const response = await fetch(`/api/creative-media?${params}`, {
       method: "POST",
@@ -1892,6 +1902,12 @@ async function loadMedia(
     Object.keys(data.creatives).forEach((creativeId) =>
       state.mediaLoadedIds.add(creativeId),
     );
+    if (
+      state.payload &&
+      state.mediaLoadedIds.size >= state.payload.creatives.length
+    ) {
+      state.mediaAllLoaded = true;
+    }
     const requestedSet = new Set(requestedIds);
     const remainingIds = creativeIds.filter(
       (creativeId) =>
@@ -1950,6 +1966,9 @@ async function loadMedia(
       `${warning.textContent || ""} Preview enrichment unavailable: ${error.message}`.trim();
     warning.classList.remove("hidden");
   } finally {
+    requestedIds.forEach((creativeId) =>
+      state.mediaLoadingIds.delete(creativeId),
+    );
     if (requestId === state.mediaRequest) $("mediaType").disabled = false;
   }
 }
@@ -2038,6 +2057,7 @@ async function loadData(force = false) {
   state.mediaRequest += 1;
   state.mediaFreshness = null;
   state.mediaLoadedIds.clear();
+  state.mediaLoadingIds.clear();
   state.mediaAllLoaded = false;
   state.mediaAllPromise = null;
   state.videoMetrics = null;
@@ -2064,10 +2084,7 @@ async function loadData(force = false) {
       warning.textContent = data.warnings.join(" ");
       warning.classList.remove("hidden");
     }
-    if (
-      state.page === "analysis" ||
-      $("mediaType").value !== "all"
-    ) {
+    if ($("mediaType").value !== "all") {
       void loadAllMedia(params);
     } else {
       void loadMedia(params);
@@ -2090,6 +2107,13 @@ async function loadData(force = false) {
     if (state.page === "analysis") {
       void loadAnalysis();
       void loadVideoMetrics(params);
+      if (
+        ["copy", "landing"].includes(
+          state.analysisReport,
+        )
+      ) {
+        void loadAllMedia(params);
+      }
       if (state.analysisReport === "fatigue") void loadFatigue(params);
     }
   } catch (error) {
@@ -2119,6 +2143,9 @@ async function loadVideoMetrics(params = currentRangeParams()) {
     state.videoMetrics = data;
     if (state.analysis && typeof renderAnalysis === "function") {
       renderAnalysis();
+      if (state.analysisReport === "hooks") {
+        setAnalysisReport("hooks");
+      }
     }
     if (state.detail?.tab === "performance") renderDetail();
   } catch (error) {
@@ -2139,7 +2166,7 @@ function creativeScore(row) {
 }
 
 function analysisCreativeRow(row, analysis, mode) {
-  const thumb = safeUrl(row.media[0]?.thumbnailUrl);
+  const thumb = cardThumbnail(row.media[0]);
   const note =
     mode === "working"
       ? analysis?.strengths?.[0] || analysis?.summary || "Strong blended performance."
@@ -2520,7 +2547,7 @@ function detailedDataTable(rows, analyses) {
 }
 
 function reportCard(row, metrics) {
-  const thumb = safeUrl(row.media[0]?.thumbnailUrl);
+  const thumb = cardThumbnail(row.media[0]);
   return `
     <article class="report-card" data-analysis-creative="${escapeHtml(row.creativeId)}">
       <div class="report-card-media">${thumb ? `<img src="${escapeHtml(thumb)}" alt="" />` : ""}</div>
@@ -2615,6 +2642,14 @@ function renderClicksReport(rows) {
 }
 
 function renderCopyReport(rows, analyses) {
+  if (!state.mediaAllLoaded) {
+    return (
+      reportHeader(
+        "Top Copy",
+        "Loading creative copy and calls to action…",
+      ) + '<div class="analysis-empty">Loading all creative media…</div>'
+    );
+  }
   const seen = new Set();
   const ranked = rows
     .flatMap((row) =>
@@ -2722,7 +2757,7 @@ function retentionLeadersTable(rows, limit = 10) {
       <thead><tr><th>#</th><th class="sticky-cell">Creative</th><th>Spend</th><th>CPI</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
       <tbody>${leaders
         .map((row, index) => {
-          const thumb = safeUrl(row.media[0]?.thumbnailUrl);
+          const thumb = cardThumbnail(row.media[0]);
           return `<tr data-analysis-creative="${escapeHtml(row.creativeId)}">
             <td class="retention-rank">${index + 1}</td>
             <td class="sticky-cell retention-creative">
@@ -2810,6 +2845,14 @@ function renderFatigueReport() {
 }
 
 function renderLandingReport(rows) {
+  if (!state.mediaAllLoaded) {
+    return (
+      reportHeader(
+        "Landing Pages",
+        "Loading destination URLs and landing-page metrics…",
+      ) + '<div class="analysis-empty">Loading all creative media…</div>'
+    );
+  }
   const groups = new Map();
   for (const row of rows) {
     const urls = [
@@ -2930,6 +2973,37 @@ function renderAnalysisReport() {
 function setAnalysisReport(report) {
   state.analysisReport = report;
   renderAnalysisReport();
+  if (
+    ["copy", "landing"].includes(report) &&
+    !state.mediaAllLoaded
+  ) {
+    void loadAllMedia();
+  }
+  if (report === "retention") {
+    void loadMedia(
+      currentRangeParams(),
+      0,
+      retentionLeaders(state.payload?.creatives || [], 10).map(
+        (row) => row.creativeId,
+      ),
+    );
+  }
+  if (report === "hooks" && state.videoMetrics) {
+    const hookIds = (state.payload?.creatives || [])
+      .map((row) => ({
+        row,
+        video: state.videoMetrics?.creatives?.[row.creativeId],
+      }))
+      .filter(({ video }) => video?.threeSecondViews >= 100)
+      .sort(
+        (a, b) =>
+          b.video.hookRate - a.video.hookRate ||
+          b.video.threeSecondViews - a.video.threeSecondViews,
+      )
+      .slice(0, 30)
+      .map(({ row }) => row.creativeId);
+    void loadMedia(currentRangeParams(), 0, hookIds);
+  }
   if (report === "fatigue" && !state.fatigue) void loadFatigue();
 }
 
@@ -2991,6 +3065,14 @@ function renderAnalysis() {
         b.metaSpend - a.metaSpend,
     )
     .slice(0, 5);
+  const overviewMediaIds = [
+    ...new Set([
+      ...working,
+      ...watch,
+      ...retentionLeaders(all, 10),
+    ].map((row) => row.creativeId)),
+  ];
+  void loadMedia(currentRangeParams(), 0, overviewMediaIds);
   $("workingCreatives").innerHTML = working
     .map((row) => analysisCreativeRow(row, analyses.get(row.creativeId), "working"))
     .join("");
@@ -4676,7 +4758,14 @@ async function switchPage(page) {
       void loadData();
     } else {
       void loadAnalysis();
-      void loadAllMedia();
+      void loadMedia();
+      if (
+        ["copy", "landing"].includes(
+          state.analysisReport,
+        )
+      ) {
+        void loadAllMedia();
+      }
       if (!state.videoMetrics) void loadVideoMetrics();
       if (state.analysisReport === "fatigue" && !state.fatigue) {
         void loadFatigue();
