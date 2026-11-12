@@ -10,6 +10,9 @@ const state = {
   dataPollTimer: null,
   mediaPollTimer: null,
   mediaFreshness: null,
+  mediaLoadedIds: new Set(),
+  mediaAllLoaded: false,
+  mediaAllPromise: null,
   visibleCards: 60,
   selected: null,
   compareIds: new Set(),
@@ -69,6 +72,11 @@ const compact = (value) =>
 const pct = (value) => `${Number(value || 0).toFixed(1)}%`;
 const retentionPct = (value, denominator) =>
   Number(denominator || 0) > 0 ? pct(value) : "—";
+
+function fatigueChange(value, suffix = "%") {
+  if (value == null) return "—";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(1)}${suffix}`;
+}
 
 function relativeAge(value) {
   const seconds = Math.max(
@@ -934,7 +942,7 @@ async function launchTestBrief(briefId) {
     }
   }
   $("workspaceDialog").close();
-  switchPage("debrief");
+  await switchPage("debrief");
   if (!state.debrief) await loadDebrief();
   setDebriefSection("experiments");
   await loadExperiments();
@@ -1790,12 +1798,37 @@ function setActiveSlice(dimension, select) {
   render();
 }
 
-async function loadMedia(params = currentRangeParams(), pollAttempt = 0) {
-  const requestId = ++state.mediaRequest;
+function visibleMediaIds() {
+  return filteredRows()
+    .slice(0, state.visibleCards)
+    .map((creative) => creative.creativeId);
+}
+
+async function loadMedia(
+  params = currentRangeParams(),
+  pollAttempt = 0,
+  creativeIds = visibleMediaIds(),
+  renderAfter = true,
+) {
+  const requestId = state.mediaRequest;
   const expectedRange = state.payload?.range;
-  if (!expectedRange) return;
+  const requestedIds = [
+    ...new Set(
+      creativeIds.filter(
+        (creativeId) => !state.mediaLoadedIds.has(creativeId),
+      ),
+    ),
+  ].slice(0, 100);
+  if (!expectedRange || requestedIds.length === 0) {
+    $("mediaType").disabled = false;
+    return;
+  }
   try {
-    const response = await fetch(`/api/creative-media?${params}`);
+    const response = await fetch(`/api/creative-media?${params}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ creativeIds: requestedIds }),
+    });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Previews unavailable");
     if (
@@ -1805,10 +1838,29 @@ async function loadMedia(params = currentRangeParams(), pollAttempt = 0) {
     ) {
       return;
     }
-    state.payload.creatives = state.payload.creatives.map((creative) => ({
-      ...creative,
-      media: data.creatives[creative.creativeId] || [],
-    }));
+    state.payload.creatives = state.payload.creatives.map((creative) =>
+      Object.prototype.hasOwnProperty.call(
+        data.creatives,
+        creative.creativeId,
+      )
+        ? {
+            ...creative,
+            media: data.creatives[creative.creativeId] || [],
+          }
+        : creative,
+    );
+    Object.keys(data.creatives).forEach((creativeId) =>
+      state.mediaLoadedIds.add(creativeId),
+    );
+    const requestedSet = new Set(requestedIds);
+    const remainingIds = creativeIds.filter(
+      (creativeId) =>
+        !requestedSet.has(creativeId) &&
+        !state.mediaLoadedIds.has(creativeId),
+    );
+    if (remainingIds.length > 0) {
+      await loadMedia(params, pollAttempt, remainingIds, false);
+    }
     state.payload.dataHealth = data.dataHealth;
     state.mediaFreshness = data.freshness || null;
     state.payload.warnings = [
@@ -1823,11 +1875,13 @@ async function loadMedia(params = currentRangeParams(), pollAttempt = 0) {
         state.detail.selectedAdId ??= updated.media[0]?.adId ?? null;
       }
     }
-    renderDataHealth();
-    renderLibraryFreshness();
-    render();
-    if (state.analysis) renderAnalysis();
-    if (state.detail) renderDetail();
+    if (renderAfter) {
+      renderDataHealth();
+      renderLibraryFreshness();
+      render();
+      if (state.analysis) renderAnalysis();
+      if (state.detail) renderDetail();
+    }
     warning.textContent = state.payload.warnings.join(" ");
     warning.classList.toggle("hidden", !state.payload.warnings.length);
     if (
@@ -1837,7 +1891,16 @@ async function loadMedia(params = currentRangeParams(), pollAttempt = 0) {
     ) {
       if (state.mediaPollTimer) clearTimeout(state.mediaPollTimer);
       state.mediaPollTimer = setTimeout(
-        () => void loadMedia(currentRangeParams(), pollAttempt + 1),
+        () => {
+          requestedIds.forEach((creativeId) =>
+            state.mediaLoadedIds.delete(creativeId),
+          );
+          void loadMedia(
+            currentRangeParams(),
+            pollAttempt + 1,
+            requestedIds,
+          );
+        },
         5_000,
       );
     }
@@ -1849,6 +1912,31 @@ async function loadMedia(params = currentRangeParams(), pollAttempt = 0) {
   } finally {
     if (requestId === state.mediaRequest) $("mediaType").disabled = false;
   }
+}
+
+function loadAllMedia(params = currentRangeParams()) {
+  if (!state.payload || state.mediaAllLoaded) return Promise.resolve();
+  if (state.mediaAllPromise) return state.mediaAllPromise;
+  const requestId = state.mediaRequest;
+  const pending = (async () => {
+    const ids = state.payload.creatives
+      .map((creative) => creative.creativeId)
+      .filter((creativeId) => !state.mediaLoadedIds.has(creativeId));
+    for (let index = 0; index < ids.length; index += 100) {
+      await loadMedia(params, 0, ids.slice(index, index + 100), false);
+      if (requestId !== state.mediaRequest) return;
+    }
+    state.mediaAllLoaded =
+      state.mediaLoadedIds.size >= state.payload.creatives.length;
+    renderDataHealth();
+    renderLibraryFreshness();
+    render();
+    if (state.analysis) renderAnalysis();
+  })().finally(() => {
+    if (state.mediaAllPromise === pending) state.mediaAllPromise = null;
+  });
+  state.mediaAllPromise = pending;
+  return pending;
 }
 
 function scheduleLibraryPoll(previousGeneratedAt, attempt = 0) {
@@ -1909,6 +1997,9 @@ async function loadData(force = false) {
   if (state.mediaPollTimer) clearTimeout(state.mediaPollTimer);
   state.mediaRequest += 1;
   state.mediaFreshness = null;
+  state.mediaLoadedIds.clear();
+  state.mediaAllLoaded = false;
+  state.mediaAllPromise = null;
   state.videoMetrics = null;
   state.fatigue = null;
   state.fatigueError = null;
@@ -1933,7 +2024,14 @@ async function loadData(force = false) {
       warning.textContent = data.warnings.join(" ");
       warning.classList.remove("hidden");
     }
-    void loadMedia(params);
+    if (
+      state.page === "analysis" ||
+      $("mediaType").value !== "all"
+    ) {
+      void loadAllMedia(params);
+    } else {
+      void loadMedia(params);
+    }
     const initialQuery = new URLSearchParams(window.location.search);
     const initialSlice = Object.entries(sliceControls).find(
       ([, config]) => initialQuery.get(config.parameter),
@@ -1973,6 +2071,22 @@ function analysisMap() {
   );
 }
 
+async function loadVideoMetrics(params = currentRangeParams()) {
+  try {
+    const response = await fetch(`/api/video-metrics?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Video metrics unavailable");
+    state.videoMetrics = data;
+    if (state.analysis && typeof renderAnalysis === "function") {
+      renderAnalysis();
+    }
+    if (state.detail?.tab === "performance") renderDetail();
+  } catch (error) {
+    console.warn(error.message);
+  }
+}
+
+/* LAZY_ANALYSIS_START */
 function creativeScore(row) {
   const spend = Math.min(1, Math.log10(Math.max(row.metaSpend, 1)) / 5);
   const cpi = row.cpi > 0 ? Math.max(0, Math.min(1, (35 - row.cpi) / 25)) : 0;
@@ -2598,11 +2712,6 @@ function renderRetentionReport(rows) {
   );
 }
 
-function fatigueChange(value, suffix = "%") {
-  if (value == null) return "—";
-  return `${value >= 0 ? "+" : ""}${value.toFixed(1)}${suffix}`;
-}
-
 function renderFatigueReport() {
   const fatigue = state.fatigue;
   if (!fatigue) {
@@ -2891,19 +3000,6 @@ async function loadAnalysis() {
   }
 }
 
-async function loadVideoMetrics(params = currentRangeParams()) {
-  try {
-    const response = await fetch(`/api/video-metrics?${params}`);
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Video metrics unavailable");
-    state.videoMetrics = data;
-    if (state.analysis) renderAnalysis();
-    if (state.detail?.tab === "performance") renderDetail();
-  } catch (error) {
-    console.warn(error.message);
-  }
-}
-
 async function loadFatigue(params = currentRangeParams()) {
   const requestId = ++state.fatigueRequest;
   const expectedRange = state.payload?.range;
@@ -2929,6 +3025,44 @@ async function loadFatigue(params = currentRangeParams()) {
     state.fatigueError = error.message;
     if (state.analysisReport === "fatigue") renderAnalysisReport();
   }
+}
+
+/* LAZY_ANALYSIS_END */
+
+/* LAZY_DEBRIEF_START */
+function hydrateDebriefPayload(data) {
+  if (!data?.normalized) return data;
+  const byId = new Map(
+    (data.all || []).map((creative) => [creative.creativeId, creative]),
+  );
+  let missingReferences = 0;
+  const hydrate = (ids) =>
+    (ids || [])
+      .map((creativeId) => {
+        const creative = byId.get(creativeId);
+        if (!creative) missingReferences += 1;
+        return creative;
+      })
+      .filter(Boolean);
+  const value = {
+    ...data,
+    winners: hydrate(data.winners),
+    losers: hydrate(data.losers),
+    retentionRisks: hydrate(data.retentionRisks),
+    scaledValidation: hydrate(data.scaledValidation),
+    decisions: hydrate(data.decisions),
+    decisionGroups: (data.decisionGroups || []).map((group) => ({
+      ...group,
+      creatives: hydrate(group.creativeIds),
+    })),
+  };
+  if (missingReferences > 0) {
+    value.warnings = [
+      ...(value.warnings || []),
+      `${missingReferences} normalized debrief reference(s) were missing from the creative index.`,
+    ];
+  }
+  return value;
 }
 
 const debriefDay = (value) =>
@@ -4373,7 +4507,7 @@ function scheduleDebriefPoll(previousGeneratedAt, attempt = 0) {
       const response = await fetch(`/api/debrief?${params}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Refresh unavailable");
-      state.debrief = data;
+      state.debrief = hydrateDebriefPayload(data);
       renderDebrief();
       if (
         data.generatedAt === previousGeneratedAt ||
@@ -4414,7 +4548,7 @@ async function loadDebrief(force = false) {
     const response = await fetch(`/api/debrief?${params}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Test debrief unavailable");
-    state.debrief = data;
+    state.debrief = hydrateDebriefPayload(data);
     renderDebrief();
     void loadDebriefComparison();
     if (data.freshness?.refreshing) {
@@ -4444,8 +4578,46 @@ function applyDebriefWindowPreset() {
   $("debriefUntil").value = until.toISOString().slice(0, 10);
 }
 
-function switchPage(page) {
+/* LAZY_DEBRIEF_END */
+
+const lazyPageScripts = {
+  analysis: "/app-analysis.js",
+  inspiration: "/app-analysis.js",
+  debrief: "/app-debrief.js",
+};
+const loadedPageScripts = new Map();
+let debriefDatesInitialized = false;
+
+function ensurePageScript(page) {
+  const src = lazyPageScripts[page];
+  if (!src) return Promise.resolve();
+  const existing = loadedPageScripts.get(src);
+  if (existing) return existing;
+  const pending = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.onload = resolve;
+    script.onerror = () =>
+      reject(new Error(`Could not load ${page} dashboard code.`));
+    document.head.append(script);
+  });
+  loadedPageScripts.set(src, pending);
+  return pending;
+}
+
+async function switchPage(page) {
+  try {
+    await ensurePageScript(page);
+  } catch (error) {
+    warning.textContent = error.message;
+    warning.classList.remove("hidden");
+    return;
+  }
   state.page = page;
+  if (page === "debrief" && !debriefDatesInitialized) {
+    debriefDatesInitialized = true;
+    applyDebriefWindowPreset();
+  }
   if (page !== "debrief" && state.debriefPollTimer) {
     clearTimeout(state.debriefPollTimer);
     state.debriefPollTimer = null;
@@ -4461,6 +4633,7 @@ function switchPage(page) {
   if (page === "analysis") {
     if (state.payload) {
       void loadAnalysis();
+      void loadAllMedia();
       if (!state.videoMetrics) void loadVideoMetrics();
       if (state.analysisReport === "fatigue" && !state.fatigue) {
         void loadFatigue();
@@ -4534,14 +4707,24 @@ async function pollScan(jobId) {
 const resetGridAndRender = () => {
   state.visibleCards = 60;
   render();
+  void loadMedia();
 };
-["sortMetric", "mediaType", "performanceSlice", "minimumSpend"].forEach((id) =>
+["sortMetric", "performanceSlice", "minimumSpend"].forEach((id) =>
   $(id).addEventListener("change", resetGridAndRender),
 );
 $("searchInput").addEventListener("input", resetGridAndRender);
+$("mediaType").addEventListener("change", () => {
+  $("mediaType").disabled = true;
+  void loadAllMedia()
+    .then(resetGridAndRender)
+    .finally(() => {
+      $("mediaType").disabled = false;
+    });
+});
 $("loadMoreCreatives").addEventListener("click", () => {
   state.visibleCards += 60;
   render();
+  void loadMedia();
 });
 $("audienceSlice").addEventListener("change", (event) =>
   setActiveSlice("publisher", event.currentTarget),
@@ -4720,7 +4903,9 @@ $("closeDialog").addEventListener("click", () => dialog.close());
 dialog.addEventListener("close", () => {
   state.detail = null;
   state.debriefDetail = null;
-  hideDebriefHoverPreview();
+  if (typeof hideDebriefHoverPreview === "function") {
+    hideDebriefHoverPreview();
+  }
 });
 dialog.addEventListener("click", (event) => {
   if (event.target === dialog) dialog.close();
@@ -4736,7 +4921,7 @@ document.querySelectorAll("[data-analysis-report]").forEach((button) => {
 });
 $("scanButton").addEventListener("click", () => void startScan(false));
 $("rescanButton").addEventListener("click", () => void startScan(true));
-$("competitorBrand").addEventListener("change", renderCompetitors);
+$("competitorBrand").addEventListener("change", () => renderCompetitors());
 $("refreshCompetitors").addEventListener("click", () =>
   void loadCompetitors(true),
 );
@@ -4813,7 +4998,7 @@ document.querySelectorAll("[data-debrief-section]").forEach((button) => {
 });
 $("debriefLearningDimension").addEventListener(
   "change",
-  renderDebriefLearnings,
+  () => renderDebriefLearnings(),
 );
 ["debriefTestedVerdict", "debriefTestedSort"].forEach((id) => {
   $(id).addEventListener("change", () => {
@@ -4861,7 +5046,6 @@ const initialQuery = new URLSearchParams(window.location.search);
 const initialPage = initialQuery.get("page");
 const initialReport = initialQuery.get("report");
 const initialDays = initialQuery.get("days");
-applyDebriefWindowPreset();
 if (
   initialDays &&
   [...$("datePreset").options].some((option) => option.value === initialDays)
@@ -4901,7 +5085,7 @@ if (
 ) {
   state.analysisReport = initialReport;
 }
-switchPage(
+void switchPage(
   ["library", "analysis", "inspiration", "debrief"].includes(initialPage)
     ? initialPage
     : "library",

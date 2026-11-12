@@ -1056,6 +1056,21 @@ async function buildMediaPayload(
   );
 }
 
+function selectMediaPayload(
+  payload: MediaPayload,
+  creativeIds: string[],
+): MediaPayload {
+  const selected = new Set(creativeIds);
+  return {
+    ...payload,
+    creatives: Object.fromEntries(
+      Object.entries(payload.creatives).filter(([creativeId]) =>
+        selected.has(creativeId),
+      ),
+    ),
+  };
+}
+
 async function buildEnrichedPayload(
   range: { since: string; until: string },
   force = false,
@@ -1996,6 +2011,29 @@ function debriefPeriodMetrics(
   };
 }
 
+function compactDebriefPayload(
+  debrief: Awaited<ReturnType<typeof buildDebriefPayload>>,
+): Record<string, unknown> {
+  const ids = (
+    creatives: typeof debrief.all,
+  ): string[] => creatives.map((creative) => creative.creativeId);
+  return {
+    ...debrief,
+    normalized: true,
+    winners: ids(debrief.winners),
+    losers: ids(debrief.losers),
+    retentionRisks: ids(debrief.retentionRisks),
+    scaledValidation: ids(debrief.scaledValidation),
+    decisions: ids(debrief.decisions),
+    decisionGroups: debrief.decisionGroups.map(
+      ({ creatives, ...group }) => ({
+        ...group,
+        creativeIds: ids(creatives),
+      }),
+    ),
+  };
+}
+
 async function readSlackDigestState(): Promise<SlackDigestState> {
   try {
     const value = JSON.parse(
@@ -2092,9 +2130,31 @@ async function deliverWeeklySlackDigest(force = false): Promise<{
 const staticFiles: Record<string, { file: string; type: string }> = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/index.html": { file: "index.html", type: "text/html; charset=utf-8" },
-  "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
   "/styles.css": { file: "styles.css", type: "text/css; charset=utf-8" },
 };
+const appSourcePromise = readFile(join(here, "app.js"), "utf8");
+const appBundleNames = ["ANALYSIS", "DEBRIEF"] as const;
+
+async function appBundle(
+  bundle: "core" | "analysis" | "debrief",
+): Promise<string> {
+  const source = await appSourcePromise;
+  if (bundle === "core") {
+    return appBundleNames.reduce((value, name) => {
+      const pattern = new RegExp(
+        `/\\* LAZY_${name}_START \\*/[\\s\\S]*?/\\* LAZY_${name}_END \\*/`,
+      );
+      return value.replace(pattern, "");
+    }, source);
+  }
+  const name = bundle.toUpperCase();
+  const pattern = new RegExp(
+    `/\\* LAZY_${name}_START \\*/([\\s\\S]*?)/\\* LAZY_${name}_END \\*/`,
+  );
+  const match = source.match(pattern);
+  if (!match?.[1]) throw new Error(`Missing ${bundle} app bundle markers.`);
+  return match[1];
+}
 
 async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -2363,6 +2423,38 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     return;
   }
 
+  if (
+    req.method === "POST" &&
+    url.pathname === "/api/creative-media"
+  ) {
+    try {
+      const range = resolveRange(url);
+      const body = await readJsonBody(req);
+      const creativeIds = Array.isArray(body.creativeIds)
+        ? [
+            ...new Set(
+              body.creativeIds
+                .map((value) => String(value).trim())
+                .filter(Boolean),
+            ),
+          ].slice(0, 100)
+        : [];
+      if (creativeIds.length === 0) {
+        throw new Error("creativeIds must contain 1–100 creative IDs.");
+      }
+      const payload = await buildMediaPayload(
+        range,
+        url.searchParams.get("refresh") === "1",
+      );
+      json(res, 200, selectMediaPayload(payload, creativeIds));
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/analysis/scan") {
     try {
       const range = resolveRange(url);
@@ -2566,7 +2658,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
         range,
         url.searchParams.get("refresh") === "1",
       );
-      json(res, 200, debrief);
+      json(res, 200, compactDebriefPayload(debrief));
     } catch (error) {
       json(res, 400, {
         error: error instanceof Error ? error.message : String(error),
@@ -2714,6 +2806,30 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
       json(res, 400, {
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+    return;
+  }
+
+  const bundle = {
+    "/app.js": "core",
+    "/app-analysis.js": "analysis",
+    "/app-debrief.js": "debrief",
+  }[url.pathname] as "core" | "analysis" | "debrief" | undefined;
+  if (bundle) {
+    try {
+      text(
+        res,
+        200,
+        await appBundle(bundle),
+        "text/javascript; charset=utf-8",
+      );
+    } catch {
+      text(
+        res,
+        500,
+        "Dashboard script unavailable",
+        "text/plain; charset=utf-8",
+      );
     }
     return;
   }
@@ -2944,6 +3060,11 @@ const server = createServer((req, res) => {
 });
 
 await mkdir(dataDirectory, { recursive: true });
+await Promise.all([
+  appBundle("core"),
+  appBundle("analysis"),
+  appBundle("debrief"),
+]);
 
 server.listen(port, host, () => {
   scheduleNextAutoScan();
