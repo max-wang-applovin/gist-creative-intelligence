@@ -6,7 +6,14 @@ import {
   resolveAdjustApp,
   type AdjustReportRow,
 } from "../bot/lib/adjust.js";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { defaultDateRange } from "../bot/lib/dates.js";
 import { normalizeCreativeName } from "../bot/lib/names.js";
@@ -177,6 +184,28 @@ export type DebriefDecisionGroup = {
   creatives: DebriefCreative[];
 };
 
+export type CreativeMapping = {
+  adjustCreativeId: string;
+  adjustCreativeName: string;
+  metaAdId: string;
+  metaAdName: string;
+  updatedAt: string;
+};
+
+export type MatchingIssue = {
+  adjustCreativeId: string;
+  adjustCreativeName: string;
+  readableName: string;
+  source: DebriefSource;
+  testingSpend: number;
+  suggestions: Array<{
+    adId: string;
+    adName: string;
+    score: number;
+    createdTime: string | null;
+  }>;
+};
+
 export type DebriefSourceSummary = {
   source: DebriefSource;
   tested: number;
@@ -257,6 +286,8 @@ export type DebriefPayload = {
   decisions: DebriefCreative[];
   decisionGroups: DebriefDecisionGroup[];
   all: DebriefCreative[];
+  matchingIssues: MatchingIssue[];
+  creativeMappings: CreativeMapping[];
   warnings: string[];
 };
 
@@ -450,6 +481,101 @@ async function fetchMetaAdInventory(): Promise<{
   }
 }
 
+const creativeMappingsPath = join(
+  snapshotDirectory,
+  "creative-mappings.json",
+);
+let creativeMappingWriteTail: Promise<void> = Promise.resolve();
+
+async function readCreativeMappings(): Promise<CreativeMapping[]> {
+  try {
+    const parsed = JSON.parse(
+      await readFile(creativeMappingsPath, "utf8"),
+    ) as { version: 1; mappings: CreativeMapping[] };
+    return parsed.version === 1 && Array.isArray(parsed.mappings)
+      ? parsed.mappings
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeCreativeMappings(
+  mappings: CreativeMapping[],
+): Promise<void> {
+  creativeMappingWriteTail = creativeMappingWriteTail
+    .catch(() => undefined)
+    .then(async () => {
+      await mkdir(snapshotDirectory, { recursive: true });
+      const temporary = `${creativeMappingsPath}.${process.pid}.${Date.now()}.tmp`;
+      await writeFile(
+        temporary,
+        `${JSON.stringify({ version: 1, mappings }, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      await rename(temporary, creativeMappingsPath);
+    });
+  return creativeMappingWriteTail;
+}
+
+async function invalidateDebriefSnapshots(): Promise<void> {
+  cache.clear();
+  try {
+    const names = await readdir(snapshotDirectory);
+    await Promise.all(
+      names
+        .filter((name) =>
+          /^\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}\.json$/.test(name),
+        )
+        .map((name) =>
+          unlink(join(snapshotDirectory, name)).catch(() => undefined),
+        ),
+    );
+  } catch {
+    // Missing snapshot directory is already fully invalidated.
+  }
+}
+
+export async function listCreativeMappings(): Promise<CreativeMapping[]> {
+  return readCreativeMappings();
+}
+
+export async function upsertCreativeMapping(input: {
+  adjustCreativeId: string;
+  adjustCreativeName: string;
+  metaAdId: string;
+  metaAdName: string;
+}): Promise<CreativeMapping> {
+  const mappings = await readCreativeMappings();
+  const value: CreativeMapping = {
+    ...input,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeCreativeMappings([
+    value,
+    ...mappings.filter(
+      (mapping) =>
+        mapping.adjustCreativeId !== input.adjustCreativeId &&
+        mapping.metaAdId !== input.metaAdId,
+    ),
+  ]);
+  await invalidateDebriefSnapshots();
+  return value;
+}
+
+export async function deleteCreativeMapping(
+  adjustCreativeId: string,
+): Promise<boolean> {
+  const mappings = await readCreativeMappings();
+  const next = mappings.filter(
+    (mapping) => mapping.adjustCreativeId !== adjustCreativeId,
+  );
+  if (next.length === mappings.length) return false;
+  await writeCreativeMappings(next);
+  await invalidateDebriefSnapshots();
+  return true;
+}
+
 function num(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) ? n : 0;
@@ -537,6 +663,28 @@ function stageMetrics(acc: StageAcc): DebriefStageMetrics {
 
 function creativeKey(raw: string): string {
   return normalizeCreativeName(cleanAdjustCreativeName(raw));
+}
+
+function matchingTokens(value: string): Set<string> {
+  return new Set(
+    normalizeCreativeName(value)
+      .split(/[^a-z0-9]+/)
+      .filter(
+        (token) =>
+          token.length >= 3 &&
+          !/^\d+$/.test(token) &&
+          !["copy", "meta", "test", "testing", "creative"].includes(token),
+      ),
+  );
+}
+
+function matchingScore(left: Set<string>, right: Set<string>): number {
+  if (left.size === 0 || right.size === 0) return 0;
+  let intersection = 0;
+  for (const token of left) {
+    if (right.has(token)) intersection += 1;
+  }
+  return intersection / new Set([...left, ...right]).size;
 }
 
 function isTestingCampaign(name: string): boolean {
@@ -975,6 +1123,21 @@ async function buildDebrief(range: {
     runUpstreamTask("meta", "debrief ad inventory", fetchMetaAdInventory),
   ]);
   const metaAds = metaInventory.ads;
+  const creativeMappings = await readCreativeMappings();
+  const mappingByCreative = new Map(
+    creativeMappings.map((mapping) => [
+      mapping.adjustCreativeId,
+      mapping,
+    ]),
+  );
+  const metaById = new Map(metaAds.map((ad) => [ad.id, ad]));
+  const mappedAdIds = new Set(
+    creativeMappings.map((mapping) => mapping.metaAdId),
+  );
+  const searchableMetaAds = metaAds.map((ad) => ({
+    ad,
+    tokens: matchingTokens(ad.name),
+  }));
   if (metaInventory.warning) warnings.push(metaInventory.warning);
 
   const usableName = (row: AdjustReportRow): string | null => {
@@ -1091,10 +1254,20 @@ async function buildDebrief(range: {
 
   const now = Date.now();
   const tested: DebriefCreative[] = [];
+  const matchingIssues: MatchingIssue[] = [];
   let unmatched = 0;
   for (const acc of byKey.values()) {
     if (acc.testing.spend <= 0 && acc.testingImpressions <= 0) continue;
-    const ads = (adsByKey.get(acc.key) ?? []).sort((a, b) =>
+    const mappedAd = mappingByCreative.get(acc.key)?.metaAdId;
+    const mappedMetaAd = mappedAd ? metaById.get(mappedAd) : undefined;
+    const exactAds = adsByKey.get(acc.key) ?? [];
+    const ads = [
+      ...exactAds,
+      ...(mappedMetaAd &&
+      !exactAds.some((ad) => ad.id === mappedMetaAd.id)
+        ? [mappedMetaAd]
+        : []),
+    ].sort((a, b) =>
       (a.createdTime ?? "9999").localeCompare(b.createdTime ?? "9999"),
     );
     if (ads.length === 0) unmatched += 1;
@@ -1107,6 +1280,48 @@ async function buildDebrief(range: {
     const source: DebriefSource = hitRate
       ? "Hit Rate"
       : (parsed.sourceCode && SOURCE_CODES[parsed.sourceCode]) || "Other";
+    if (
+      ads.length === 0 &&
+      !mappingByCreative.has(acc.key)
+    ) {
+      const tokens = matchingTokens(acc.name);
+      const suggestions = searchableMetaAds
+        .filter(({ ad }) => !mappedAdIds.has(ad.id))
+        .map(({ ad, tokens: candidateTokens }) => ({
+          ad,
+          score: matchingScore(tokens, candidateTokens),
+        }))
+        .filter((candidate) => candidate.score >= 0.15)
+        .sort(
+          (a, b) =>
+            b.score - a.score ||
+            (b.ad.createdTime ?? "").localeCompare(
+              a.ad.createdTime ?? "",
+            ),
+        )
+        .slice(0, 3)
+        .map(({ ad, score }) => ({
+          adId: ad.id,
+          adName: ad.name,
+          score: Math.round(score * 100),
+          createdTime: ad.createdTime,
+        }));
+      matchingIssues.push({
+        adjustCreativeId: acc.key,
+        adjustCreativeName: acc.name,
+        readableName: parsed.readableName,
+        source,
+        testingSpend: round2(acc.testing.spend),
+        suggestions,
+      });
+    } else if (
+      ads.length === 0 &&
+      mappingByCreative.has(acc.key)
+    ) {
+      warnings.push(
+        `Saved mapping for ${acc.name} points to a Meta ad that is not in the current inventory; unlink it in Data repair to choose another match.`,
+      );
+    }
 
     const metaCreated = ads.find((ad) => ad.createdTime)?.createdTime ?? null;
     const uploadedAt = metaCreated
@@ -1696,6 +1911,10 @@ async function buildDebrief(range: {
     decisions,
     decisionGroups,
     all,
+    matchingIssues: matchingIssues.sort(
+      (a, b) => b.testingSpend - a.testingSpend,
+    ),
+    creativeMappings,
     warnings,
   };
 }

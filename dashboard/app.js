@@ -19,6 +19,7 @@ const state = {
   videoMetrics: null,
   competitors: null,
   debrief: null,
+  debriefComparison: null,
   debriefLoading: false,
   debriefPollTimer: null,
   debriefDetail: null,
@@ -36,6 +37,7 @@ const state = {
   testBriefs: [],
   upstreamHealth: null,
   experimentCreativeIds: new Set(),
+  slackDigest: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -575,25 +577,58 @@ function renderWorkspace() {
         );
         return `<div class="workspace-item">
           <div><strong>${escapeHtml(brief.title)}</strong><small>${escapeHtml(brief.sourceBrand)} · ${escapeHtml(brief.status)} · ${linked.length} linked experiment${linked.length === 1 ? "" : "s"}</small><p>${escapeHtml(brief.hypothesis || "No hypothesis yet.")}</p></div>
+          <button data-launch-brief="${escapeHtml(brief.id)}">${linked.length > 1 ? `Open latest of ${linked.length}` : linked.length ? "Open experiment" : "Create experiment"}</button>
         </div>`;
       })
       .join("") || '<div class="analysis-empty">No competitor briefs yet.</div>';
 }
 
+function renderSlackDigest() {
+  const digest = state.slackDigest;
+  if (!digest) return;
+  const configured = digest.config?.configured;
+  const missing = [
+    !digest.config?.hasBotToken &&
+      "CREATIVE_INTELLIGENCE_SLACK_BOT_TOKEN",
+    !digest.config?.hasChannel &&
+      "CREATIVE_INTELLIGENCE_SLACK_DIGEST_CHANNEL",
+  ].filter(Boolean);
+  $("slackDigestStatus").textContent = configured
+    ? `${digest.config.schedule} · channel ${digest.config.channel} · ${
+        digest.state?.lastSentAt
+          ? `last sent ${new Date(digest.state.lastSentAt).toLocaleString()}`
+          : "not sent yet"
+      }${digest.state?.lastError ? ` · last error: ${digest.state.lastError}` : ""}`
+    : `Add ${missing.join(" and ")} in Render to enable scheduled delivery.`;
+  $("slackDigestPreview").textContent =
+    digest.preview || "Generate a preview to review the next digest.";
+  $("copySlackDigest").disabled = !digest.preview;
+  $("sendSlackDigest").disabled = !configured;
+}
+
 async function loadWorkspace() {
-  const [reportsResponse, briefsResponse, experimentsResponse] =
+  const [
+    reportsResponse,
+    briefsResponse,
+    experimentsResponse,
+    digestResponse,
+  ] =
     await Promise.all([
       fetch("/api/saved-reports"),
       fetch("/api/test-briefs"),
       fetch("/api/experiments"),
+      fetch("/api/slack-digest"),
     ]);
   const reports = await reportsResponse.json();
   const briefs = await briefsResponse.json();
   const experiments = await experimentsResponse.json();
+  const digest = await digestResponse.json();
   state.savedReports = reports.reports || [];
   state.testBriefs = briefs.briefs || [];
   state.experiments = experiments.experiments || [];
+  state.slackDigest = digest;
   renderWorkspace();
+  renderSlackDigest();
 }
 
 const experimentCreativeId = (creative) =>
@@ -741,7 +776,7 @@ function renderExperiments() {
   $("experimentList").innerHTML =
     state.experiments.length > 0
       ? `<table class="analysis-data-table debrief-table">
-          <thead><tr><th class="sticky-cell">Experiment</th><th>Status</th><th>Owner</th><th>Hypothesis</th><th>Source brief</th><th>Creatives</th><th>Live outcome</th><th>Primary metric</th><th>Guardrails</th><th>Confound checks</th><th>Updated</th><th></th></tr></thead>
+          <thead><tr><th class="sticky-cell">Experiment</th><th>Status</th><th>Owner</th><th>Hypothesis</th><th>Source brief</th><th>Creatives</th><th>Live outcome</th><th>Decision</th><th>Primary metric</th><th>Guardrails</th><th>Confound checks</th><th>Updated</th><th></th></tr></thead>
           <tbody>${state.experiments
             .map((experiment) => {
               const warnings = warningsFor(experiment);
@@ -757,11 +792,12 @@ function renderExperiments() {
                 <td>${escapeHtml(brief?.title || "—")}</td>
                 <td>${experiment.creativeIds?.length || 0}</td>
                 <td><span class="experiment-outcome ${escapeHtml(outcome.tone)}">${escapeHtml(outcome.label)}</span><small>${escapeHtml(outcome.detail)}</small></td>
+                <td>${escapeHtml(experiment.decision || "—")}</td>
                 <td>${escapeHtml(experiment.primaryMetric)}</td>
                 <td>${escapeHtml(experiment.guardrails || "—")}</td>
                 <td>${warnings.length ? warnings.map((warning) => `<span class="experiment-warning">${escapeHtml(warning)}</span>`).join("") : '<span class="experiment-ready">Ready</span>'}</td>
                 <td>${new Date(experiment.updatedAt).toLocaleDateString()}</td>
-                <td><button data-edit-experiment="${escapeHtml(experiment.id)}">Edit</button><button data-delete-experiment="${escapeHtml(experiment.id)}">Delete</button></td>
+                <td><button data-edit-experiment="${escapeHtml(experiment.id)}">Edit</button>${experiment.status !== "Decided" && experiment.creativeIds?.length ? `<button data-decide-experiment="${escapeHtml(experiment.id)}">Mark decided</button>` : ""}<button data-delete-experiment="${escapeHtml(experiment.id)}">Delete</button></td>
               </tr>`;
             })
             .join("")}</tbody>
@@ -785,6 +821,24 @@ async function loadExperiments() {
   renderExperiments();
 }
 
+function populateExperimentForm(experiment) {
+  $("experimentId").value = experiment.id;
+  $("experimentName").value = experiment.name;
+  $("experimentOwner").value = experiment.owner;
+  $("experimentStatus").value = experiment.status;
+  $("experimentHypothesis").value = experiment.hypothesis;
+  $("experimentControl").value = experiment.control;
+  $("experimentVariants").value = experiment.variants;
+  $("experimentPrimaryMetric").value = experiment.primaryMetric;
+  $("experimentGuardrails").value = experiment.guardrails;
+  $("experimentTestBrief").value = experiment.testBriefId || "";
+  state.experimentCreativeIds = new Set(experiment.creativeIds || []);
+  $("experimentCreativeSearch").value = "";
+  renderExperimentCreativePicker();
+  $("experimentNotes").value = experiment.notes;
+  $("experimentName").focus();
+}
+
 function clearExperimentForm() {
   $("experimentForm").reset();
   $("experimentId").value = "";
@@ -794,11 +848,20 @@ function clearExperimentForm() {
 
 async function saveExperiment(event) {
   event.preventDefault();
+  const existing = state.experiments.find(
+    (experiment) => experiment.id === $("experimentId").value,
+  );
+  const status = $("experimentStatus").value;
+  let decision = status === "Decided" ? existing?.decision || null : null;
+  if (status === "Decided" && !decision) {
+    decision = window.prompt("Record the final decision:")?.trim() || null;
+    if (!decision) return;
+  }
   const payload = {
     id: $("experimentId").value || undefined,
     name: $("experimentName").value,
     owner: $("experimentOwner").value,
-    status: $("experimentStatus").value,
+    status,
     hypothesis: $("experimentHypothesis").value,
     control: $("experimentControl").value,
     variants: $("experimentVariants").value,
@@ -806,6 +869,9 @@ async function saveExperiment(event) {
     guardrails: $("experimentGuardrails").value,
     creativeIds: [...state.experimentCreativeIds],
     testBriefId: $("experimentTestBrief").value || null,
+    decision,
+    decidedAt:
+      status === "Decided" ? existing?.decidedAt || null : null,
     notes: $("experimentNotes").value,
   };
   const response = await fetch("/api/experiments", {
@@ -816,6 +882,89 @@ async function saveExperiment(event) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Could not save experiment");
   clearExperimentForm();
+  await loadExperiments();
+}
+
+async function launchTestBrief(briefId) {
+  const brief = state.testBriefs.find((item) => item.id === briefId);
+  if (!brief) return;
+  let experiment = state.experiments.find(
+    (item) => item.testBriefId === briefId,
+  );
+  if (!experiment) {
+    const response = await fetch("/api/experiments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: brief.title,
+        hypothesis: brief.hypothesis || "Define the expected creative outcome.",
+        control: "",
+        variants: brief.variants,
+        owner: "",
+        primaryMetric: "D7 retained-user cost",
+        guardrails: "CPSU, D1 retention, mature cohort size",
+        creativeIds: [],
+        testBriefId: brief.id,
+        status: "Planned",
+        notes: `Created from ${brief.sourceBrand || "competitor"} test brief.`,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || "Could not create experiment");
+    }
+    experiment = data.experiment;
+  }
+  if (brief.status !== "Launched") {
+    const briefResponse = await fetch("/api/test-briefs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...brief, status: "Launched" }),
+    });
+    if (!briefResponse.ok) {
+      const briefError = await briefResponse.json();
+      throw new Error(
+        briefError.error ||
+          "The experiment exists, but the test brief status did not update.",
+      );
+    }
+  }
+  $("workspaceDialog").close();
+  switchPage("debrief");
+  if (!state.debrief) await loadDebrief();
+  setDebriefSection("experiments");
+  await loadExperiments();
+  const saved = state.experiments.find(
+    (item) => item.id === experiment.id,
+  );
+  if (saved) populateExperimentForm(saved);
+}
+
+async function decideExperiment(experimentId) {
+  const experiment = state.experiments.find(
+    (item) => item.id === experimentId,
+  );
+  if (!experiment) return;
+  const outcome = experimentOutcome(experiment);
+  const decision = window.prompt(
+    "Record the final decision:",
+    `${outcome.label}: ${outcome.detail}`,
+  );
+  if (!decision?.trim()) return;
+  const response = await fetch("/api/experiments", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...experiment,
+      status: "Decided",
+      decision: decision.trim(),
+      decidedAt: new Date().toISOString(),
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || "Could not record decision");
+  }
   await loadExperiments();
 }
 
@@ -3692,6 +3841,78 @@ function renderDebriefLearnings() {
     : '<div class="analysis-empty">No creatives were launched in this period.</div>';
 }
 
+function renderMatchingIssues() {
+  const issues = state.debrief?.matchingIssues || [];
+  const mappings = state.debrief?.creativeMappings || [];
+  const mappingsMarkup = mappings.length
+    ? `<div class="matching-mappings"><strong>Confirmed mappings</strong>${mappings
+        .map(
+          (mapping) =>
+            `<span>${escapeHtml(mapping.adjustCreativeName)} → ${escapeHtml(mapping.metaAdName)} <button data-delete-mapping="${escapeHtml(mapping.adjustCreativeId)}">Unlink</button></span>`,
+        )
+        .join("")}</div>`
+    : "";
+  $("debriefMatchingIssues").innerHTML =
+    mappingsMarkup +
+    (issues.length
+      ? `<table class="analysis-data-table debrief-table"><thead><tr><th class="sticky-cell">Adjust creative</th><th>Source</th><th>Testing spend</th><th>Suggested Meta ad</th><th></th></tr></thead><tbody>${issues
+          .map(
+            (issue) => `<tr>
+              <td class="sticky-cell"><strong>${escapeHtml(issue.readableName)}</strong><small>${escapeHtml(issue.adjustCreativeName)}</small></td>
+              <td>${escapeHtml(issue.source)}</td>
+              <td>${money(issue.testingSpend)}</td>
+              <td><select data-mapping-suggestion="${escapeHtml(issue.adjustCreativeId)}"><option value="">Choose a match…</option>${issue.suggestions
+                .map(
+                  (suggestion) =>
+                    `<option value="${escapeHtml(suggestion.adId)}">${escapeHtml(suggestion.adName)} · ${suggestion.score}% match</option>`,
+                )
+                .join("")}</select>${issue.suggestions.length ? "" : "<small>No confident name match found.</small>"}</td>
+              <td><button data-save-mapping="${escapeHtml(issue.adjustCreativeId)}" ${issue.suggestions.length ? "" : "disabled"}>Link</button></td>
+            </tr>`,
+          )
+          .join("")}</tbody></table>`
+      : '<div class="analysis-empty">All tested Adjust creatives are matched to Meta ads.</div>');
+}
+
+async function saveCreativeMapping(adjustCreativeId) {
+  const issue = (state.debrief?.matchingIssues || []).find(
+    (item) => item.adjustCreativeId === adjustCreativeId,
+  );
+  const select = document.querySelector(
+    `[data-mapping-suggestion="${CSS.escape(adjustCreativeId)}"]`,
+  );
+  const suggestion = issue?.suggestions.find(
+    (item) => item.adId === select?.value,
+  );
+  if (!issue || !suggestion) {
+    window.alert("Choose a suggested Meta ad first.");
+    return;
+  }
+  const response = await fetch("/api/creative-mappings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      adjustCreativeId,
+      adjustCreativeName: issue.adjustCreativeName,
+      metaAdId: suggestion.adId,
+      metaAdName: suggestion.adName,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Could not save mapping");
+  await loadDebrief(true);
+}
+
+async function deleteMapping(adjustCreativeId) {
+  const response = await fetch(
+    `/api/creative-mappings?adjustCreativeId=${encodeURIComponent(adjustCreativeId)}`,
+    { method: "DELETE" },
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Could not remove mapping");
+  await loadDebrief(true);
+}
+
 function setDebriefSection(section) {
   state.debriefSection = section;
   document.querySelectorAll("[data-debrief-section]").forEach((button) => {
@@ -3711,7 +3932,75 @@ function setDebriefSection(section) {
   if (section === "decisions") renderDebriefTestedCreatives();
   else if (section === "learnings") renderDebriefLearnings();
   else if (section === "all") renderDebriefAll();
+  else if (section === "repair") renderMatchingIssues();
   else if (section === "experiments") void loadExperiments();
+}
+
+function renderDebriefComparison() {
+  const comparison = state.debriefComparison;
+  if (
+    !comparison ||
+    comparison.current.range.since !== state.debrief?.range.since ||
+    comparison.current.range.until !== state.debrief?.range.until
+  ) {
+    $("debriefPeriodComparison").innerHTML =
+      "<span>Loading prior-period comparison…</span>";
+    return;
+  }
+  const current = comparison.current.metrics;
+  const previous = comparison.previous.metrics;
+  const items = [
+    ["Testing spend", current.testingSpend, previous.testingSpend, money, false],
+    ["CPSU", current.cpsu, previous.cpsu, debriefMoney, true],
+    ["D1 benchmark", current.d1, previous.d1, debriefPct, false],
+    ["D3 benchmark", current.d3, previous.d3, debriefPct, false],
+    ["D7 benchmark", current.d7, previous.d7, debriefPct, false],
+    ["Win rate", current.winRate, previous.winRate, debriefPct, false],
+  ];
+  $("debriefPeriodComparison").innerHTML = items
+    .map(([label, value, prior, formatter, lowerIsBetter]) => {
+      const delta =
+        value == null || prior == null || Number(prior) === 0
+          ? null
+          : ((Number(value) - Number(prior)) / Math.abs(Number(prior))) * 100;
+      const deltaText =
+        value == null || prior == null
+          ? "No prior baseline"
+          : Number(prior) === 0
+            ? Number(value) === 0
+              ? "No change vs prior"
+              : `From ${formatter(prior)} in prior period`
+            : `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}% vs prior`;
+      const favorable =
+        value == null || prior == null
+          ? null
+          : Number(prior) === 0
+            ? Number(value) === 0
+              ? null
+              : lowerIsBetter
+                ? Number(value) < 0
+                : Number(value) > 0
+            : lowerIsBetter
+              ? delta < 0
+              : delta > 0;
+      return `<div><span>${label}</span><strong>${formatter(value)}</strong><small class="${favorable == null ? "" : favorable ? "positive" : "negative"}">${deltaText}</small></div>`;
+    })
+    .join("");
+}
+
+async function loadDebriefComparison() {
+  if (!state.debrief) return;
+  const params = new URLSearchParams(state.debrief.range);
+  try {
+    const response = await fetch(`/api/debrief-comparison?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Comparison unavailable");
+    state.debriefComparison = data;
+    renderDebriefComparison();
+  } catch (error) {
+    $("debriefPeriodComparison").innerHTML =
+      `<span>${escapeHtml(error.message)}</span>`;
+  }
 }
 
 function renderDebrief() {
@@ -3735,6 +4024,7 @@ function renderDebrief() {
     <div><span>Testing spend</span><strong>${money(s.testingSpend, true)}</strong></div>
     <div><span>Testing CPSU</span><strong>${debriefMoney(s.cpsu)}</strong></div>
     <div><span>D7 benchmark</span><strong>${debriefPct(data.benchmarks?.average?.d7)}</strong></div>`;
+  renderDebriefComparison();
   $("debriefBenchmarks").innerHTML = renderDebriefBenchmarks(data.benchmarks);
   renderDebriefTestedCreatives();
   $("debriefSegmentBenchmarks").innerHTML =
@@ -3765,6 +4055,7 @@ function renderDebrief() {
     sourceSelect.value = selected;
   }
   renderDebriefAll();
+  renderMatchingIssues();
   populateExperimentLinks();
   if (state.experiments.length) renderExperiments();
   setDebriefSection(state.debriefSection);
@@ -3829,6 +4120,7 @@ async function loadDebrief(force = false) {
     if (!response.ok) throw new Error(data.error || "Test debrief unavailable");
     state.debrief = data;
     renderDebrief();
+    void loadDebriefComparison();
     if (data.freshness?.refreshing) {
       scheduleDebriefPoll(data.generatedAt);
     }
@@ -4013,9 +4305,60 @@ $("workspaceButton").addEventListener("click", () => {
 $("closeWorkspace").addEventListener("click", () =>
   $("workspaceDialog").close(),
 );
+$("refreshSlackDigest").addEventListener("click", () => {
+  $("refreshSlackDigest").disabled = true;
+  void fetch("/api/slack-digest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "preview" }),
+  })
+    .then(async (response) => {
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Could not generate digest");
+      }
+      state.slackDigest = data;
+      renderSlackDigest();
+    })
+    .catch((error) => window.alert(error.message))
+    .finally(() => {
+      $("refreshSlackDigest").disabled = false;
+    });
+});
+$("copySlackDigest").addEventListener("click", async () => {
+  await navigator.clipboard.writeText(
+    state.slackDigest?.preview || "",
+  );
+  $("copySlackDigest").textContent = "Copied";
+  setTimeout(() => ($("copySlackDigest").textContent = "Copy digest"), 1_500);
+});
+$("sendSlackDigest").addEventListener("click", () => {
+  $("sendSlackDigest").disabled = true;
+  void fetch("/api/slack-digest", { method: "POST" })
+    .then(async (response) => {
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Could not send digest");
+      }
+      await loadWorkspace();
+    })
+    .catch((error) => window.alert(error.message))
+    .finally(() => {
+      $("sendSlackDigest").disabled =
+        !state.slackDigest?.config?.configured;
+    });
+});
 $("workspaceDialog").addEventListener("click", (event) => {
   if (event.target === $("workspaceDialog")) {
     $("workspaceDialog").close();
+    return;
+  }
+  const briefId = event.target.closest("[data-launch-brief]")?.dataset
+    .launchBrief;
+  if (briefId) {
+    void launchTestBrief(briefId).catch((error) =>
+      window.alert(error.message),
+    );
     return;
   }
   const reportId = event.target.closest("[data-delete-report]")?.dataset
@@ -4055,20 +4398,15 @@ $("experimentList").addEventListener("click", (event) => {
   if (editId) {
     const experiment = state.experiments.find((item) => item.id === editId);
     if (!experiment) return;
-    $("experimentId").value = experiment.id;
-    $("experimentName").value = experiment.name;
-    $("experimentOwner").value = experiment.owner;
-    $("experimentStatus").value = experiment.status;
-    $("experimentHypothesis").value = experiment.hypothesis;
-    $("experimentControl").value = experiment.control;
-    $("experimentVariants").value = experiment.variants;
-    $("experimentPrimaryMetric").value = experiment.primaryMetric;
-    $("experimentGuardrails").value = experiment.guardrails;
-    $("experimentTestBrief").value = experiment.testBriefId || "";
-    state.experimentCreativeIds = new Set(experiment.creativeIds || []);
-    $("experimentCreativeSearch").value = "";
-    renderExperimentCreativePicker();
-    $("experimentNotes").value = experiment.notes;
+    populateExperimentForm(experiment);
+    return;
+  }
+  const decideId = event.target.closest("[data-decide-experiment]")?.dataset
+    .decideExperiment;
+  if (decideId) {
+    void decideExperiment(decideId).catch((error) =>
+      window.alert(error.message),
+    );
     return;
   }
   const deleteId = event.target.closest("[data-delete-experiment]")?.dataset
@@ -4117,6 +4455,22 @@ $("debriefWindowPreset").addEventListener("change", () => {
   });
 });
 $("debriefPage").addEventListener("click", (event) => {
+  const saveMapping = event.target.closest("[data-save-mapping]")?.dataset
+    .saveMapping;
+  if (saveMapping) {
+    void saveCreativeMapping(saveMapping).catch((error) =>
+      window.alert(error.message),
+    );
+    return;
+  }
+  const deleteMappingId = event.target.closest("[data-delete-mapping]")
+    ?.dataset.deleteMapping;
+  if (deleteMappingId) {
+    void deleteMapping(deleteMappingId).catch((error) =>
+      window.alert(error.message),
+    );
+    return;
+  }
   const testedConcept = event.target.closest("[data-tested-concept]")?.dataset
     .testedConcept;
   if (testedConcept) {

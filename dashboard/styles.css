@@ -312,6 +312,12 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-summary-bar > div:last-child { border-right: 0; }
 .debrief-summary-bar span { display: block; color: #75808b; font-size: 7px; font-weight: 750; text-transform: uppercase; }
 .debrief-summary-bar strong { display: block; margin-top: 1px; color: #26313c; font-size: 13px; }
+.debrief-period-comparison { display: grid; grid-template-columns: repeat(6, minmax(100px,1fr)); gap: 6px; margin: 8px 0 12px; }
+.debrief-period-comparison > div { padding: 8px 10px; border: 1px solid #dfe4ea; border-radius: 8px; background: white; }
+.debrief-period-comparison span, .debrief-period-comparison small { display: block; color: #75808b; font-size: 8px; }
+.debrief-period-comparison strong { display: block; margin: 3px 0; color: #26313c; font-size: 12px; }
+.debrief-period-comparison small.positive { color: #18724f; }
+.debrief-period-comparison small.negative { color: #b54a42; }
 .debrief-section-nav { display: flex; gap: 3px; margin-top: 7px; overflow-x: auto; }
 .debrief-section-nav button { flex: 0 0 auto; border: 0; border-radius: 6px; padding: 6px 10px; background: transparent; color: #64707c; font-size: 9px; }
 .debrief-section-nav button.active { background: #dfe9fa; color: #185ecb; font-weight: 800; }
@@ -477,6 +483,10 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
 .experiment-creative-chips button small { color: #677f9f; }
 .experiment-picker-empty { color: #7c8791; font-size: 10px; }
 .experiment-picker-count { grid-column: 1 / -1; color: #7c8791; font-size: 9px; }
+.matching-mappings { display: grid; gap: 5px; margin-bottom: 12px; padding: 10px; border: 1px solid #dfe3e7; border-radius: 8px; background: white; }
+.matching-mappings span { display: flex; justify-content: space-between; gap: 10px; color: #58636e; font-size: 9px; }
+.slack-digest-section { margin-top: 18px; }
+.slack-digest-section pre { max-height: 320px; overflow: auto; white-space: pre-wrap; border: 1px solid #dfe3e7; border-radius: 8px; padding: 12px; background: #f7f9fb; color: #2b333b; font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .experiment-actions { display: flex; gap: 8px; }
 .experiment-warning, .experiment-ready { display: inline-block; margin: 2px; border-radius: 999px; padding: 3px 7px; font-size: 8px; font-weight: 750; white-space: nowrap; }
 .experiment-warning { background: #fdf1de; color: #9a5d0c; }
@@ -589,6 +599,7 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .analysis-summary, .analysis-columns, .concept-dimensions, .recipe-grid, .inspiration-grid, .library-links { grid-template-columns: 1fr 1fr; }
   .debrief-action-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .debrief-summary-bar { grid-template-columns: repeat(4, minmax(80px,1fr)); }
+  .debrief-period-comparison { grid-template-columns: repeat(2, minmax(100px,1fr)); }
   .debrief-learning-grid { grid-template-columns: 1fr; }
   .learning-cpsu-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .freshness { display: none; }

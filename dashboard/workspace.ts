@@ -14,6 +14,8 @@ export type Experiment = {
   creativeIds: string[];
   testBriefId: string | null;
   status: "Planned" | "Running" | "Decided";
+  decision: string | null;
+  decidedAt: string | null;
   notes: string;
   createdAt: string;
   updatedAt: string;
@@ -67,6 +69,8 @@ export class WorkspaceStore {
           ...experiment,
           creativeIds: experiment.creativeIds ?? [],
           testBriefId: experiment.testBriefId ?? null,
+          decision: experiment.decision ?? null,
+          decidedAt: experiment.decidedAt ?? null,
         })),
         savedReports: value.savedReports ?? [],
         testBriefs: value.testBriefs ?? [],

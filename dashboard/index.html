@@ -281,12 +281,14 @@
             <div class="debrief-sticky-summary">
               <p id="debriefHeadline" class="debrief-headline"></p>
               <div id="debriefSummary" class="debrief-summary-bar"></div>
+              <div id="debriefPeriodComparison" class="debrief-period-comparison"><span>Loading prior-period comparison…</span></div>
               <nav class="debrief-section-nav" aria-label="Test debrief sections">
                 <button class="active" data-debrief-section="decisions">Tested creatives</button>
                 <button data-debrief-section="learnings">Learnings</button>
                 <button data-debrief-section="scaled">Scale candidates</button>
                 <button data-debrief-section="benchmarks">Benchmarks</button>
                 <button data-debrief-section="all">All data</button>
+                <button data-debrief-section="repair">Data repair</button>
                 <button data-debrief-section="experiments">Experiments</button>
               </nav>
             </div>
@@ -430,6 +432,11 @@
                 <ul id="debriefRules"></ul>
               </details>
             </section>
+            <section id="debriefSectionRepair" class="analysis-card debrief-card hidden" data-debrief-section-panel="repair">
+              <div class="analysis-card-title">Adjust ↔ Meta matching repair</div>
+              <p class="debrief-rule">Review tested creatives that could not be joined to a live Meta ad. Suggested matches are based on normalized name overlap; confirm before linking.</p>
+              <div id="debriefMatchingIssues" class="data-table-wrap debrief-table-wrap"></div>
+            </section>
             <section id="debriefSectionExperiments" class="analysis-card debrief-card hidden" data-debrief-section-panel="experiments">
               <div class="analysis-card-title">Experiment registry</div>
               <p class="debrief-rule">Capture the hypothesis and fixed test design before interpreting results.</p>
@@ -474,6 +481,12 @@
         <header><p class="eyebrow">CREATIVE WORKSPACE</p><h2>Saved views and test briefs</h2></header>
         <section><h3>Saved report views</h3><div id="savedReportsList"></div></section>
         <section><h3>Competitor test briefs</h3><div id="testBriefsList"></div></section>
+        <section class="slack-digest-section">
+          <h3>Weekly Slack digest</h3>
+          <p id="slackDigestStatus">Loading digest configuration…</p>
+          <pre id="slackDigestPreview"></pre>
+          <div class="experiment-actions"><button id="refreshSlackDigest" class="analysis-secondary" type="button">Generate preview</button><button id="copySlackDigest" class="analysis-secondary" type="button">Copy digest</button><button id="sendSlackDigest" class="analysis-primary" type="button">Send now</button></div>
+        </section>
       </div>
     </dialog>
 

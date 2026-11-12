@@ -41,9 +41,17 @@ import { fetchAdManageAssets } from "./admanage-assets.js";
 import { fetchAdjacentCompetitorCreatives } from "./competitors.js";
 import {
   buildDebriefPayload,
+  deleteCreativeMapping,
+  listCreativeMappings,
   refreshDebriefPayload,
   resolveDebriefRange,
+  upsertCreativeMapping,
 } from "./debrief.js";
+import {
+  buildSlackDigest,
+  sendSlackDigest,
+  slackDigestConfig,
+} from "./slack-digest.js";
 import { WorkspaceStore } from "./workspace.js";
 import {
   runUpstreamTask,
@@ -120,6 +128,17 @@ const analysisStore = new CreativeAnalysisStore(
 const workspaceStore = new WorkspaceStore(
   join(dataDirectory, "creative-workspace.json"),
 );
+const slackDigestStatePath = join(
+  dataDirectory,
+  "slack-digest-state.json",
+);
+type SlackDigestState = {
+  lastSentAt: string | null;
+  lastRangeUntil: string | null;
+  lastError: string | null;
+  lastPreview: string | null;
+  lastPreviewRange: { since: string; until: string } | null;
+};
 
 type ScanJob = {
   id: string;
@@ -1670,6 +1689,146 @@ async function buildDebriefVisualLearnings(
   };
 }
 
+function previousDateRange(range: {
+  since: string;
+  until: string;
+}): { since: string; until: string } {
+  const since = new Date(`${range.since}T00:00:00Z`);
+  const until = new Date(`${range.until}T00:00:00Z`);
+  const days =
+    Math.floor((until.getTime() - since.getTime()) / 86_400_000) + 1;
+  const previousUntil = new Date(since);
+  previousUntil.setUTCDate(previousUntil.getUTCDate() - 1);
+  const previousSince = new Date(previousUntil);
+  previousSince.setUTCDate(previousSince.getUTCDate() - (days - 1));
+  return {
+    since: previousSince.toISOString().slice(0, 10),
+    until: previousUntil.toISOString().slice(0, 10),
+  };
+}
+
+function debriefPeriodMetrics(
+  debrief: Awaited<ReturnType<typeof buildDebriefPayload>>,
+): {
+  tested: number;
+  testingSpend: number;
+  cpsu: number | null;
+  d1: number | null;
+  d3: number | null;
+  d7: number | null;
+  winRate: number | null;
+} {
+  const decided =
+    debrief.summary.winners +
+    debrief.summary.losers +
+    debrief.summary.middle;
+  return {
+    tested: debrief.summary.tested,
+    testingSpend: debrief.summary.testingSpend,
+    cpsu: debrief.summary.cpsu,
+    d1: debrief.benchmarks.average.d1,
+    d3: debrief.benchmarks.average.d3,
+    d7: debrief.benchmarks.average.d7,
+    winRate:
+      decided > 0
+        ? Math.round((debrief.summary.winners / decided) * 10_000) / 100
+        : null,
+  };
+}
+
+async function readSlackDigestState(): Promise<SlackDigestState> {
+  try {
+    const value = JSON.parse(
+      await readFile(slackDigestStatePath, "utf8"),
+    ) as SlackDigestState;
+    return {
+      lastSentAt: value.lastSentAt ?? null,
+      lastRangeUntil: value.lastRangeUntil ?? null,
+      lastError: value.lastError ?? null,
+      lastPreview: value.lastPreview ?? null,
+      lastPreviewRange: value.lastPreviewRange ?? null,
+    };
+  } catch {
+    return {
+      lastSentAt: null,
+      lastRangeUntil: null,
+      lastError: null,
+      lastPreview: null,
+      lastPreviewRange: null,
+    };
+  }
+}
+
+async function writeSlackDigestState(
+  value: SlackDigestState,
+): Promise<void> {
+  await mkdir(dirname(slackDigestStatePath), { recursive: true });
+  const temporary = `${slackDigestStatePath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  await rename(temporary, slackDigestStatePath);
+}
+
+function dashboardPublicUrl(): string {
+  return (
+    process.env.DASHBOARD_PUBLIC_URL?.trim() ||
+    process.env.RENDER_EXTERNAL_URL?.trim() ||
+    `http://localhost:${port}`
+  ).replace(/\/+$/, "");
+}
+
+async function weeklySlackDigest(): Promise<{
+  range: { since: string; until: string };
+  text: string;
+}> {
+  const range = defaultDateRange(28);
+  const debrief = await buildDebriefPayload(range);
+  return {
+    range,
+    text: buildSlackDigest(debrief, dashboardPublicUrl()),
+  };
+}
+
+async function deliverWeeklySlackDigest(force = false): Promise<{
+  channel: string | null;
+  timestamp: string | null;
+  range: { since: string; until: string };
+  skipped: boolean;
+}> {
+  const digest = await weeklySlackDigest();
+  const state = await readSlackDigestState();
+  if (!force && state.lastRangeUntil === digest.range.until) {
+    return {
+      channel: slackDigestConfig().channel,
+      timestamp: null,
+      range: digest.range,
+      skipped: true,
+    };
+  }
+  try {
+    const sent = await sendSlackDigest(digest.text);
+    await writeSlackDigestState({
+      lastSentAt: new Date().toISOString(),
+      lastRangeUntil: digest.range.until,
+      lastError: null,
+      lastPreview: digest.text,
+      lastPreviewRange: digest.range,
+    });
+    return {
+      ...sent,
+      range: digest.range,
+      skipped: false,
+    };
+  } catch (error) {
+    await writeSlackDigestState({
+      ...(await readSlackDigestState()),
+      lastError: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
 const staticFiles: Record<string, { file: string; type: string }> = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/index.html": { file: "index.html", type: "text/html; charset=utf-8" },
@@ -1721,6 +1880,11 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
       if (!["Planned", "Running", "Decided"].includes(status)) {
         throw new Error("status must be Planned, Running, or Decided.");
       }
+      const decision =
+        String(body.decision ?? "").trim().slice(0, 5_000) || null;
+      if (status === "Decided" && !decision) {
+        throw new Error("decision is required when status is Decided.");
+      }
       json(res, 200, {
         experiment: await workspaceStore.upsertExperiment({
           id: body.id ? String(body.id) : undefined,
@@ -1743,6 +1907,12 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
           testBriefId:
             String(body.testBriefId ?? "").trim().slice(0, 200) || null,
           status: status as "Planned" | "Running" | "Decided",
+          decision,
+          decidedAt:
+            status === "Decided"
+              ? String(body.decidedAt ?? "").trim() ||
+                new Date().toISOString()
+              : null,
           notes: String(body.notes ?? "").trim().slice(0, 5_000),
         }),
       });
@@ -1828,6 +1998,106 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     } catch (error) {
       json(res, 400, {
         error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/creative-mappings") {
+    try {
+      if (req.method === "GET") {
+        json(res, 200, { mappings: await listCreativeMappings() });
+        return;
+      }
+      if (req.method === "DELETE") {
+        const adjustCreativeId =
+          url.searchParams.get("adjustCreativeId") ?? "";
+        json(
+          res,
+          (await deleteCreativeMapping(adjustCreativeId)) ? 200 : 404,
+          { deleted: adjustCreativeId },
+        );
+        return;
+      }
+      if (req.method !== "POST") {
+        json(res, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const adjustCreativeId = String(
+        body.adjustCreativeId ?? "",
+      ).trim();
+      const adjustCreativeName = String(
+        body.adjustCreativeName ?? "",
+      ).trim();
+      const metaAdId = String(body.metaAdId ?? "").trim();
+      const metaAdName = String(body.metaAdName ?? "").trim();
+      if (
+        !adjustCreativeId ||
+        !adjustCreativeName ||
+        !/^\d+$/.test(metaAdId) ||
+        !metaAdName
+      ) {
+        throw new Error(
+          "adjustCreativeId, adjustCreativeName, numeric metaAdId and metaAdName are required.",
+        );
+      }
+      json(res, 200, {
+        mapping: await upsertCreativeMapping({
+          adjustCreativeId: adjustCreativeId.slice(0, 300),
+          adjustCreativeName: adjustCreativeName.slice(0, 2_000),
+          metaAdId,
+          metaAdName: metaAdName.slice(0, 2_000),
+        }),
+      });
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/slack-digest") {
+    try {
+      if (req.method === "GET") {
+        const state = await readSlackDigestState();
+        json(res, 200, {
+          config: slackDigestConfig(),
+          state,
+          range: state.lastPreviewRange,
+          preview: state.lastPreview,
+        });
+        return;
+      }
+      if (req.method !== "POST") {
+        json(res, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (body.action === "preview") {
+        const digest = await weeklySlackDigest();
+        const state = await readSlackDigestState();
+        await writeSlackDigestState({
+          ...state,
+          lastPreview: digest.text,
+          lastPreviewRange: digest.range,
+        });
+        json(res, 200, {
+          config: slackDigestConfig(),
+          state: await readSlackDigestState(),
+          range: digest.range,
+          preview: digest.text,
+        });
+      } else {
+        json(res, 200, {
+          sent: await deliverWeeklySlackDigest(true),
+        });
+      }
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+        config: slackDigestConfig(),
       });
     }
     return;
@@ -2018,6 +2288,36 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
         url.searchParams.get("refresh") === "1",
       );
       json(res, 200, debrief);
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/debrief-comparison") {
+    try {
+      const range = resolveDebriefRange(
+        url.searchParams.get("since"),
+        url.searchParams.get("until"),
+      );
+      const previousRange = previousDateRange(range);
+      const [current, previous] = await Promise.all([
+        buildDebriefPayload(range),
+        buildDebriefPayload(previousRange),
+      ]);
+      json(res, 200, {
+        generatedAt: new Date().toISOString(),
+        current: {
+          range,
+          metrics: debriefPeriodMetrics(current),
+        },
+        previous: {
+          range: previousRange,
+          metrics: debriefPeriodMetrics(previous),
+        },
+      });
     } catch (error) {
       json(res, 400, {
         error: error instanceof Error ? error.message : String(error),
@@ -2305,6 +2605,57 @@ function scheduleDashboardPrewarm(): void {
   scheduleDaily();
 }
 
+function scheduleWeeklySlackDigest(): void {
+  if (!slackDigestConfig().configured) return;
+  const sendIfDue = async (): Promise<void> => {
+    const now = new Date();
+    const state = await readSlackDigestState();
+    const latestDue = new Date(now);
+    const daysSinceMonday = (now.getUTCDay() - 1 + 7) % 7;
+    latestDue.setUTCDate(now.getUTCDate() - daysSinceMonday);
+    latestDue.setUTCHours(14, 0, 0, 0);
+    if (latestDue.getTime() > now.getTime()) {
+      latestDue.setUTCDate(latestDue.getUTCDate() - 7);
+    }
+    if (
+      !state.lastSentAt ||
+      Date.parse(state.lastSentAt) < latestDue.getTime()
+    ) {
+      await deliverWeeklySlackDigest();
+    }
+  };
+  setTimeout(() => {
+    void sendIfDue().catch((error: unknown) => {
+      process.stderr.write(
+        `Weekly Slack digest failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    });
+  }, 5 * 60_000);
+  const scheduleNext = () => {
+    const now = new Date();
+    const next = new Date(now);
+    let daysUntilMonday = (1 - now.getUTCDay() + 7) % 7;
+    if (
+      daysUntilMonday === 0 &&
+      now.getUTCHours() >= 14
+    ) {
+      daysUntilMonday = 7;
+    }
+    next.setUTCDate(now.getUTCDate() + daysUntilMonday);
+    next.setUTCHours(14, 0, 0, 0);
+    setTimeout(() => {
+      void deliverWeeklySlackDigest()
+        .catch((error: unknown) => {
+          process.stderr.write(
+            `Weekly Slack digest failed: ${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        })
+        .finally(scheduleNext);
+    }, next.getTime() - now.getTime());
+  };
+  scheduleNext();
+}
+
 const server = createServer((req, res) => {
   void handler(req, res).catch((error) => {
     json(res, 500, {
@@ -2319,6 +2670,7 @@ server.listen(port, host, () => {
   scheduleNextAutoScan();
   scheduleDebriefRefresh();
   scheduleDashboardPrewarm();
+  scheduleWeeklySlackDigest();
   const displayHost = host === "0.0.0.0" ? "localhost" : host;
   process.stdout.write(
     `Creative Intelligence dashboard: http://${displayHost}:${port}\n` +
