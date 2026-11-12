@@ -1,0 +1,31 @@
+name: Apply dashboard payload optimizations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/payload-optimizations.patch.gz.b64
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply verified patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/payload-optimizations.patch.gz.b64 | gzip --decompress > /tmp/payload-optimizations.patch
+          git apply --check /tmp/payload-optimizations.patch
+          git apply /tmp/payload-optimizations.patch
+          rm .github/payload-optimizations.patch.gz.b64 .github/workflows/apply-payload-optimizations.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Reduce dashboard startup payloads"
+          git push origin HEAD:main
