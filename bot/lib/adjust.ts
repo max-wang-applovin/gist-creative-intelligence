@@ -630,32 +630,67 @@ export async function fetchAdjustCreativePerformance(
   const appsAvailable = await listAdjustApps(apiToken);
   const app = resolveApp(appsAvailable, opts);
 
+  const performanceDimensions = [
+    "creative_id_network",
+    "creative",
+    "creative_network",
+    "partner_name",
+  ];
+  const performanceMetrics = [
+    "installs",
+    "network_cost",
+    "impressions",
+    "clicks",
+    "revenue",
+    "roas",
+  ];
+  const retentionDimensions = [
+    "day",
+    "creative_id_network",
+    "creative",
+    "partner_name",
+  ];
+  const retentionMetrics = [
+    "installs",
+    "retained_users_d1",
+    "retained_users_d3",
+    "retained_users_d7",
+  ];
   const [raw, retentionRows] = await Promise.all([
-    fetchAdjustDailyCachedRows(
-      apiToken,
-      app.token,
-      range,
-      ["creative_id_network", "creative", "creative_network", "partner_name"],
-      [
-        "installs",
-        "network_cost",
-        "impressions",
-        "clicks",
-        "revenue",
-        "roas",
-      ],
-      "Adjust creative performance",
-      opts.force === true,
-    ),
-    fetchAdjustDailyCachedRows(
-      apiToken,
-      app.token,
-      range,
-      ["day", "creative_id_network", "creative", "partner_name"],
-      ["installs", "retained_users_d1", "retained_users_d3", "retained_users_d7"],
-      "Adjust retention cohorts",
-      opts.force === true,
-    ),
+    opts.force
+      ? fetchAdjustReportRows(
+          apiToken,
+          app.token,
+          range,
+          performanceDimensions,
+          performanceMetrics,
+          "Adjust creative performance",
+        )
+      : fetchAdjustDailyCachedRows(
+          apiToken,
+          app.token,
+          range,
+          performanceDimensions,
+          performanceMetrics,
+          "Adjust creative performance",
+        ),
+    opts.force
+      ? fetchAdjustReportRows(
+          apiToken,
+          app.token,
+          range,
+          retentionDimensions,
+          retentionMetrics,
+          "Adjust retention cohorts",
+        )
+      : fetchAdjustDailyCachedRows(
+          apiToken,
+          app.token,
+          range,
+          retentionDimensions,
+          retentionMetrics,
+          "Adjust retention cohorts",
+        ),
   ]);
   const mapped: AdjustCreativeRow[] = [];
   for (const row of raw) {
