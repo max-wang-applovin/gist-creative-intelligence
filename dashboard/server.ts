@@ -176,6 +176,26 @@ type ApiCreative = ReturnType<typeof buildHelperCompatibleDashboard>[number] & {
   media: MetaAdMedia[];
 };
 
+type DashboardDataHealth = {
+  status: "healthy" | "degraded" | "loading";
+  sources: {
+    adjust: "live" | "fixture";
+    meta: "live" | "error" | "pending";
+    adManage: "live" | "unconfigured" | "error" | "pending";
+  };
+  coverage: {
+    creatives: number;
+    ads: number;
+    matchedAds: number;
+    unmatchedAds: number;
+    creativesWithPreview: number;
+    previewSpendPct: number;
+    matureD1Creatives: number;
+    matureD3Creatives: number;
+    matureD7Creatives: number;
+  };
+};
+
 type DashboardPayload = {
   source: string;
   range: { since: string; until: string };
@@ -188,30 +208,26 @@ type DashboardPayload = {
   adjustApp: string | null;
   totals: ReturnType<typeof summarizeBoard>;
   creatives: ApiCreative[];
-  dataHealth: {
-    status: "healthy" | "degraded";
-    sources: {
-      adjust: "live" | "fixture";
-      meta: "live" | "error";
-      adManage: "live" | "unconfigured" | "error";
-    };
-    coverage: {
-      creatives: number;
-      ads: number;
-      matchedAds: number;
-      unmatchedAds: number;
-      creativesWithPreview: number;
-      previewSpendPct: number;
-      matureD1Creatives: number;
-      matureD3Creatives: number;
-      matureD7Creatives: number;
-    };
-  };
+  dataHealth: DashboardDataHealth;
+  warnings: string[];
+};
+
+type MediaPayload = {
+  generatedAt: string;
+  range: { since: string; until: string };
+  creatives: Record<string, MetaAdMedia[]>;
+  dataHealth: DashboardDataHealth;
   warnings: string[];
 };
 
 type CacheEntry = { expiresAt: number; value: DashboardPayload };
 const dataCache = new Map<string, CacheEntry>();
+const dataInflight = new Map<string, Promise<DashboardPayload>>();
+const mediaCache = new Map<
+  string,
+  { expiresAt: number; value: MediaPayload }
+>();
+const mediaInflight = new Map<string, Promise<MediaPayload>>();
 const previewCache = new Map<string, { expiresAt: number; src: string }>();
 const sliceCache = new Map<string, { expiresAt: number; value: SlicePayload }>();
 const detailCache = new Map<
@@ -375,114 +391,212 @@ async function buildPayload(range: {
   const key = `${range.since}:${range.until}`;
   const cached = dataCache.get(key);
   if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
+  const pending = dataInflight.get(key);
+  if (pending) return pending;
 
-  const adjust = await fetchAdjustCreativePerformance(range, {
-    partner: "meta",
-  });
-  const board = buildHelperCompatibleDashboard(adjust.rows, maxScanLimit);
-  const warnings: string[] = [];
-  let mediaByAd: Record<string, MetaAdMedia> = {};
-  let metaFailed = false;
-  let adManageFailed = false;
-  try {
-    mediaByAd = await fetchMetaAdMedia(board.flatMap((row) => row.adIds));
-  } catch (error) {
-    metaFailed = true;
-    warnings.push(
-      `Media previews unavailable: ${error instanceof Error ? error.message : String(error)}`,
+  const promise = (async () => {
+    const adjust = await fetchAdjustCreativePerformance(range, {
+      partner: "meta",
+    });
+    const board = buildHelperCompatibleDashboard(adjust.rows, maxScanLimit);
+    const creatives: ApiCreative[] = board.map((row) => ({
+      ...row,
+      media: [],
+    }));
+    const withSpend = creatives.filter((row) => row.metaSpend > 0);
+    const adIds = [...new Set(board.flatMap((row) => row.adIds))];
+    const dataHealth: DashboardDataHealth = {
+      status: "loading",
+      sources: {
+        adjust: adjust.source,
+        meta: "pending",
+        adManage: process.env.ADMANAGE_API_KEY?.trim()
+          ? "pending"
+          : "unconfigured",
+      },
+      coverage: {
+        creatives: withSpend.length,
+        ads: adIds.length,
+        matchedAds: 0,
+        unmatchedAds: adIds.length,
+        creativesWithPreview: 0,
+        previewSpendPct: 0,
+        matureD1Creatives: withSpend.filter(
+          (row) => row.adjustRetentionDenD1 > 0,
+        ).length,
+        matureD3Creatives: withSpend.filter(
+          (row) => row.adjustRetentionDenD3 > 0,
+        ).length,
+        matureD7Creatives: withSpend.filter(
+          (row) => row.adjustRetentionDenD7 > 0,
+        ).length,
+      },
+    };
+    const value: DashboardPayload = {
+      source: adjust.source,
+      range,
+      generatedAt: new Date().toISOString(),
+      method: "Gist helper-compatible Adjust creative grouping",
+      retention: {
+        method:
+          "retained_users_dN / installs from mature Adjust UTC calendar cohorts",
+        cutoffs: adjust.retentionCutoffs,
+      },
+      adjustApp: adjust.appName,
+      totals: summarizeBoard(withSpend),
+      creatives,
+      dataHealth,
+      warnings: [],
+    };
+    dataCache.set(key, { expiresAt: Date.now() + 5 * 60_000, value });
+    return value;
+  })().finally(() => dataInflight.delete(key));
+  dataInflight.set(key, promise);
+  return promise;
+}
+
+async function buildMediaPayload(
+  range: { since: string; until: string },
+  force = false,
+): Promise<MediaPayload> {
+  const key = `${range.since}:${range.until}`;
+  const cached = mediaCache.get(key);
+  if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
+  const pending = mediaInflight.get(key);
+  if (pending) return pending;
+
+  const promise = (async () => {
+    const dashboard = await buildPayload(range);
+    const adIds = [
+      ...new Set(dashboard.creatives.flatMap((creative) => creative.adIds)),
+    ];
+    const adManageConfigured = Boolean(
+      process.env.ADMANAGE_API_KEY?.trim(),
     );
-  }
-  try {
-    const assets = await fetchAdManageAssets(range);
-    for (const [adId, media] of Object.entries(mediaByAd)) {
-      const asset = assets[adId];
-      if (!asset) continue;
-      media.videoUrl = asset.videoUrl;
-      if ((media.thumbnailWidth ?? 0) < 1000) {
-        if (asset.imageUrl?.startsWith("https://")) {
-          media.thumbnailUrl = asset.imageUrl;
-        } else if (
-          asset.thumbnailUrl?.startsWith("https://") &&
-          !asset.thumbnailUrl.includes("media.admanage.")
-        ) {
-          media.thumbnailUrl = asset.thumbnailUrl;
+    const [metaResult, assetResult] = await Promise.allSettled([
+      fetchMetaAdMedia(adIds),
+      adManageConfigured
+        ? fetchAdManageAssets(range)
+        : Promise.resolve({}),
+    ]);
+    const warnings: string[] = [];
+    const metaFailed = metaResult.status === "rejected";
+    const adManageFailed =
+      adManageConfigured && assetResult.status === "rejected";
+    const mediaByAd =
+      metaResult.status === "fulfilled" ? metaResult.value : {};
+
+    if (metaResult.status === "rejected") {
+      warnings.push(
+        `Media previews unavailable: ${metaResult.reason instanceof Error ? metaResult.reason.message : String(metaResult.reason)}`,
+      );
+    }
+    if (assetResult.status === "fulfilled") {
+      const assets = assetResult.value as Awaited<
+        ReturnType<typeof fetchAdManageAssets>
+      >;
+      for (const [adId, media] of Object.entries(mediaByAd)) {
+        const asset = assets[adId];
+        if (!asset) continue;
+        media.videoUrl = asset.videoUrl;
+        if ((media.thumbnailWidth ?? 0) < 1000) {
+          if (asset.imageUrl?.startsWith("https://")) {
+            media.thumbnailUrl = asset.imageUrl;
+          } else if (
+            asset.thumbnailUrl?.startsWith("https://") &&
+            !asset.thumbnailUrl.includes("media.admanage.")
+          ) {
+            media.thumbnailUrl = asset.thumbnailUrl;
+          }
         }
       }
+    } else {
+      warnings.push(
+        `High-resolution asset fallback unavailable: ${assetResult.reason instanceof Error ? assetResult.reason.message : String(assetResult.reason)}`,
+      );
     }
-  } catch (error) {
-    adManageFailed = true;
-    warnings.push(
-      `High-resolution asset fallback unavailable: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
 
-  const creatives: ApiCreative[] = board.map((row) => ({
-    ...row,
-    media: row.adIds
-      .map((adId) => mediaByAd[adId])
-      .filter((media): media is MetaAdMedia => media !== undefined),
-  }));
-  const withSpend = creatives.filter((row) => row.metaSpend > 0);
-  const adIds = [...new Set(board.flatMap((row) => row.adIds))];
-  const matchedAds = adIds.filter((adId) => mediaByAd[adId]).length;
-  const previewCreatives = withSpend.filter((row) => row.media.length > 0);
-  const totalSpend = withSpend.reduce((sum, row) => sum + row.metaSpend, 0);
-  const previewSpend = previewCreatives.reduce(
-    (sum, row) => sum + row.metaSpend,
-    0,
-  );
-  const round2 = (number: number) => Math.round(number * 100) / 100;
-  const dataHealth: DashboardPayload["dataHealth"] = {
-    status:
-      adjust.source === "live" && !metaFailed && warnings.length === 0
-        ? "healthy"
-        : "degraded",
-    sources: {
-      adjust: adjust.source,
-      meta: metaFailed ? "error" : "live",
-      adManage: !process.env.ADMANAGE_API_KEY?.trim()
-        ? "unconfigured"
-        : adManageFailed
-          ? "error"
-          : "live",
-    },
-    coverage: {
-      creatives: withSpend.length,
-      ads: adIds.length,
-      matchedAds,
-      unmatchedAds: adIds.length - matchedAds,
-      creativesWithPreview: previewCreatives.length,
-      previewSpendPct:
-        totalSpend > 0 ? round2((previewSpend / totalSpend) * 100) : 0,
-      matureD1Creatives: withSpend.filter(
-        (row) => row.adjustRetentionDenD1 > 0,
-      ).length,
-      matureD3Creatives: withSpend.filter(
-        (row) => row.adjustRetentionDenD3 > 0,
-      ).length,
-      matureD7Creatives: withSpend.filter(
-        (row) => row.adjustRetentionDenD7 > 0,
-      ).length,
-    },
+    const creatives = Object.fromEntries(
+      dashboard.creatives.map((creative) => [
+        creative.creativeId,
+        creative.adIds
+          .map((adId) => mediaByAd[adId])
+          .filter((media): media is MetaAdMedia => media !== undefined),
+      ]),
+    );
+    const withSpend = dashboard.creatives.filter(
+      (creative) => creative.metaSpend > 0,
+    );
+    const previewCreatives = withSpend.filter(
+      (creative) => creatives[creative.creativeId]?.length,
+    );
+    const totalSpend = withSpend.reduce(
+      (sum, creative) => sum + creative.metaSpend,
+      0,
+    );
+    const previewSpend = previewCreatives.reduce(
+      (sum, creative) => sum + creative.metaSpend,
+      0,
+    );
+    const matchedAds = adIds.filter((adId) => mediaByAd[adId]).length;
+    const round2 = (number: number) => Math.round(number * 100) / 100;
+    const value: MediaPayload = {
+      generatedAt: new Date().toISOString(),
+      range,
+      creatives,
+      dataHealth: {
+        ...dashboard.dataHealth,
+        status:
+          dashboard.source === "live" && !metaFailed && !adManageFailed
+            ? "healthy"
+            : "degraded",
+        sources: {
+          adjust: dashboard.dataHealth.sources.adjust,
+          meta: metaFailed ? "error" : "live",
+          adManage: !adManageConfigured
+            ? "unconfigured"
+            : adManageFailed
+              ? "error"
+              : "live",
+        },
+        coverage: {
+          ...dashboard.dataHealth.coverage,
+          matchedAds,
+          unmatchedAds: adIds.length - matchedAds,
+          creativesWithPreview: previewCreatives.length,
+          previewSpendPct:
+            totalSpend > 0 ? round2((previewSpend / totalSpend) * 100) : 0,
+        },
+      },
+      warnings,
+    };
+    mediaCache.set(key, {
+      expiresAt: Date.now() + 10 * 60_000,
+      value,
+    });
+    return value;
+  })().finally(() => mediaInflight.delete(key));
+  mediaInflight.set(key, promise);
+  return promise;
+}
+
+async function buildEnrichedPayload(
+  range: { since: string; until: string },
+  force = false,
+): Promise<DashboardPayload> {
+  const [dashboard, media] = await Promise.all([
+    buildPayload(range, force),
+    buildMediaPayload(range, force),
+  ]);
+  return {
+    ...dashboard,
+    creatives: dashboard.creatives.map((creative) => ({
+      ...creative,
+      media: media.creatives[creative.creativeId] ?? [],
+    })),
+    dataHealth: media.dataHealth,
+    warnings: [...dashboard.warnings, ...media.warnings],
   };
-  const value: DashboardPayload = {
-    source: adjust.source,
-    range,
-    generatedAt: new Date().toISOString(),
-    method: "Gist helper-compatible Adjust creative grouping",
-    retention: {
-      method:
-        "retained_users_dN / installs from mature Adjust UTC calendar cohorts",
-      cutoffs: adjust.retentionCutoffs,
-    },
-    adjustApp: adjust.appName,
-    totals: summarizeBoard(withSpend),
-    creatives,
-    dataHealth,
-    warnings,
-  };
-  dataCache.set(key, { expiresAt: Date.now() + 5 * 60_000, value });
-  return value;
 }
 
 async function buildAnalysisPayload(range: {
@@ -507,7 +621,7 @@ async function buildAnalysisPayload(range: {
     analysis: CreativeAnalysis | null;
   }>;
 }> {
-  const dashboard = await buildPayload(range);
+  const dashboard = await buildEnrichedPayload(range);
   const saved = new Map(
     (await analysisStore.list()).map((record) => [record.creativeId, record]),
   );
@@ -582,7 +696,7 @@ async function runScanJob(
 ): Promise<void> {
   job.status = "running";
   try {
-    const dashboard = await buildPayload(range);
+    const dashboard = await buildEnrichedPayload(range);
     const candidates = dashboard.creatives
       .filter((creative) => creative.media.length > 0)
       .slice(0, limit);
@@ -1332,6 +1446,25 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     return;
   }
 
+  if (url.pathname === "/api/creative-media") {
+    try {
+      const range = resolveRange(url);
+      json(
+        res,
+        200,
+        await buildMediaPayload(
+          range,
+          url.searchParams.get("refresh") === "1",
+        ),
+      );
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
   if (url.pathname === "/api/analysis") {
     try {
       json(res, 200, await buildAnalysisPayload(resolveRange(url)));
@@ -1418,7 +1551,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
         json(res, 200, cached.value);
         return;
       }
-      const dashboard = await buildPayload(range);
+      const dashboard = await buildEnrichedPayload(range);
       const index = dashboard.creatives.findIndex(
         (creative) => creative.creativeId === creativeId,
       );
@@ -1597,7 +1730,15 @@ function scheduleDebriefRefresh(): void {
       },
     );
   };
-  refresh();
+  setTimeout(() => {
+    void buildDebriefPayload(resolveDebriefRange(null, null)).catch(
+      (error: unknown) => {
+        process.stderr.write(
+          `Initial debrief warm-up failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      },
+    );
+  }, 90_000);
   setInterval(refresh, 30 * 60_000);
 }
 

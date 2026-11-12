@@ -7,6 +7,11 @@ export type AdjustApp = {
   name: string;
 };
 
+const ADJUST_APPS_CACHE_TTL_MS = 60 * 60_000;
+let adjustAppsCache:
+  | { apiToken: string; expiresAt: number; apps: AdjustApp[] }
+  | undefined;
+
 export type AdjustPerformanceResult = {
   source: DataSource;
   appToken: string | null;
@@ -101,6 +106,12 @@ function asApps(payload: unknown): AdjustApp[] {
 
 /** List apps visible to this API token via Report Service filters_data. */
 export async function listAdjustApps(apiToken: string): Promise<AdjustApp[]> {
+  if (
+    adjustAppsCache?.apiToken === apiToken &&
+    adjustAppsCache.expiresAt > Date.now()
+  ) {
+    return adjustAppsCache.apps;
+  }
   const url = new URL("https://automate.adjust.com/reports-service/filters_data");
   url.searchParams.set("required_filters", "apps");
 
@@ -115,7 +126,13 @@ export async function listAdjustApps(apiToken: string): Promise<AdjustApp[]> {
     throw new Error(`Adjust filters_data ${response.status}: ${body.slice(0, 400)}`);
   }
 
-  return asApps(await response.json());
+  const apps = asApps(await response.json());
+  adjustAppsCache = {
+    apiToken,
+    expiresAt: Date.now() + ADJUST_APPS_CACHE_TTL_MS,
+    apps,
+  };
+  return apps;
 }
 
 function resolveApp(
@@ -399,23 +416,33 @@ export async function fetchAdjustCreativePerformance(
   const appsAvailable = await listAdjustApps(apiToken);
   const app = resolveApp(appsAvailable, opts);
 
-  const raw = await fetchAdjustReportRows(
-    apiToken,
-    app.token,
-    range,
-    ["creative_id_network", "creative", "creative_network", "partner_name"],
-    [
-      "installs",
-      "network_cost",
-      "impressions",
-      "clicks",
-      "revenue",
-      "roas",
-      "retention_rate_d1",
-      "retention_rate_d3",
-      "retention_rate_d7",
-    ],
-  );
+  const [raw, retentionRows] = await Promise.all([
+    fetchAdjustReportRows(
+      apiToken,
+      app.token,
+      range,
+      ["creative_id_network", "creative", "creative_network", "partner_name"],
+      [
+        "installs",
+        "network_cost",
+        "impressions",
+        "clicks",
+        "revenue",
+        "roas",
+        "retention_rate_d1",
+        "retention_rate_d3",
+        "retention_rate_d7",
+      ],
+    ),
+    fetchAdjustReportRows(
+      apiToken,
+      app.token,
+      range,
+      ["day", "creative_id_network", "creative", "partner_name"],
+      ["installs", "retained_users_d1", "retained_users_d3", "retained_users_d7"],
+      "Adjust retention cohorts",
+    ),
+  ]);
   const mapped: AdjustCreativeRow[] = [];
   for (const row of raw) {
     const network = row.partner_name?.trim() || row.network?.trim() || "unknown";
@@ -468,14 +495,6 @@ export async function fetchAdjustCreativePerformance(
   // Retention rates need their own mature cohort denominators. Pull daily
   // retained-user numerators and count installs only for fully mature cohort
   // days; weighting aggregate rates by all installs biases newer creatives.
-  const retentionRows = await fetchAdjustReportRows(
-    apiToken,
-    app.token,
-    range,
-    ["day", "creative_id_network", "creative", "partner_name"],
-    ["installs", "retained_users_d1", "retained_users_d3", "retained_users_d7"],
-    "Adjust retention cohorts",
-  );
   const cutoffs = {
     1: fullMatureCutoff(1),
     3: fullMatureCutoff(3),

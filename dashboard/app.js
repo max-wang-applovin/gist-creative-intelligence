@@ -1,10 +1,12 @@
 const state = {
   payload: null,
   slices: { publisher: null, demographic: null, device: null, os: null },
+  sliceLoading: new Set(),
   activeSlice: null,
   initialSliceApplied: false,
   initialDetailApplied: false,
   loading: false,
+  mediaRequest: 0,
   selected: null,
   compareIds: new Set(),
   detail: null,
@@ -197,7 +199,8 @@ function filteredRows() {
 function mediaMarkup(row, index) {
   const media = row.media[0];
   if (!media) {
-    return `<div class="media-frame"><div class="media-empty">No Meta preview<br>for this grouping</div></div>`;
+    const pending = state.payload?.dataHealth?.status === "loading";
+    return `<div class="media-frame"><div class="media-empty">${pending ? "Loading preview…" : "No Meta preview<br>for this grouping"}</div></div>`;
   }
   const thumbnail = safeUrl(media.thumbnailUrl);
   const directVideo = safeUrl(media.videoUrl);
@@ -291,9 +294,15 @@ function renderDataHealth() {
   const coverage = health.coverage;
   const banner = $("dataHealthBanner");
   banner.className = `data-health-banner ${health.status}`;
-  banner.innerHTML =
-    `<span></span><strong>${health.status === "healthy" ? "Data healthy" : "Data degraded"}</strong>` +
-    `<small>${coverage.creativesWithPreview}/${coverage.creatives} previews · ${coverage.previewSpendPct.toFixed(1)}% spend covered · ${coverage.matureD7Creatives} mature D7</small>`;
+  if (health.status === "loading") {
+    banner.innerHTML =
+      "<span></span><strong>Performance ready</strong>" +
+      `<small>Loading previews in the background · ${coverage.matureD7Creatives} mature D7</small>`;
+  } else {
+    banner.innerHTML =
+      `<span></span><strong>${health.status === "healthy" ? "Data healthy" : "Data degraded"}</strong>` +
+      `<small>${coverage.creativesWithPreview}/${coverage.creatives} previews · ${coverage.previewSpendPct.toFixed(1)}% spend covered · ${coverage.matureD7Creatives} mature D7</small>`;
+  }
   banner.classList.remove("hidden");
 }
 
@@ -1134,6 +1143,9 @@ function renderDetail() {
     button.addEventListener("click", () => {
       state.detail.tab = button.dataset.detailTab;
       renderDetail();
+      if (state.detail.tab === "performance" && !state.videoMetrics) {
+        void loadVideoMetrics();
+      }
     });
   });
   $("dialogContent")
@@ -1175,6 +1187,9 @@ async function openDetail(creativeId) {
   };
   renderDetail();
   if (!dialog.open) dialog.showModal();
+  if (state.detail.tab === "performance" && !state.videoMetrics) {
+    void loadVideoMetrics();
+  }
 
   try {
     const params = currentRangeParams();
@@ -1183,6 +1198,10 @@ async function openDetail(creativeId) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Detail unavailable");
     if (state.detail?.row.creativeId !== creativeId) return;
+    if (data.creative) {
+      state.detail.row = data.creative;
+      state.detail.selectedAdId ??= data.creative.media?.[0]?.adId ?? null;
+    }
     state.detail.trend = data.trend || [];
   } catch {
     if (state.detail?.row.creativeId === creativeId) {
@@ -1263,69 +1282,62 @@ function appendOption(select, value, label) {
   select.append(option);
 }
 
-function populateSliceControls() {
-  const audience = $("audienceSlice");
-  audience.replaceChildren();
-  appendOption(audience, "all", "Audience All");
-  for (const segment of state.slices.publisher?.segments || []) {
-    appendOption(audience, segment.key, segment.label);
-  }
-  audience.disabled = false;
+const sliceControls = {
+  publisher: {
+    id: "audienceSlice",
+    label: "Audience All",
+    parameter: "audience",
+  },
+  demographic: {
+    id: "demographicSlice",
+    label: "Demographic All",
+    parameter: "demographic",
+  },
+  device: { id: "deviceSlice", label: "Device All", parameter: "device" },
+  os: { id: "osSlice", label: "OS All", parameter: "os" },
+};
 
-  const device = $("deviceSlice");
-  device.replaceChildren();
-  appendOption(device, "all", "Device All");
-  for (const segment of state.slices.device?.segments || []) {
-    appendOption(device, segment.key, segment.label);
+function populateSliceControl(dimension) {
+  const config = sliceControls[dimension];
+  const select = $(config.id);
+  const selected = select.value;
+  select.replaceChildren();
+  appendOption(select, "all", config.label);
+  const segments = state.slices[dimension]?.segments || [];
+  if (dimension !== "demographic") {
+    for (const segment of segments) {
+      appendOption(select, segment.key, segment.label);
+    }
+  } else {
+    const genders = [
+      ...new Set(segments.map((segment) => segment.gender)),
+    ].filter(Boolean);
+    const ages = [...new Set(segments.map((segment) => segment.age))].filter(
+      Boolean,
+    );
+    for (const gender of genders) {
+      const label =
+        gender === "female" ? "Women" : gender === "male" ? "Men" : "Unknown";
+      appendOption(select, `gender:${gender}`, `${label} · All ages`);
+    }
+    for (const age of ages) {
+      appendOption(select, `age:${age}`, `Age ${age} · All genders`);
+    }
+    for (const segment of segments) {
+      appendOption(select, `segment:${segment.key}`, segment.label);
+    }
   }
-  device.disabled = false;
-
-  const operatingSystem = $("osSlice");
-  operatingSystem.replaceChildren();
-  appendOption(operatingSystem, "all", "OS All");
-  for (const segment of state.slices.os?.segments || []) {
-    appendOption(operatingSystem, segment.key, segment.label);
+  select.disabled = false;
+  if ([...select.options].some((option) => option.value === selected)) {
+    select.value = selected;
   }
-  operatingSystem.disabled = false;
-
-  const demographic = $("demographicSlice");
-  demographic.replaceChildren();
-  appendOption(demographic, "all", "Demographic All");
-  const segments = state.slices.demographic?.segments || [];
-  const genders = [...new Set(segments.map((segment) => segment.gender))].filter(
-    Boolean,
-  );
-  const ages = [...new Set(segments.map((segment) => segment.age))].filter(
-    Boolean,
-  );
-  for (const gender of genders) {
-    const label =
-      gender === "female" ? "Women" : gender === "male" ? "Men" : "Unknown";
-    appendOption(demographic, `gender:${gender}`, `${label} · All ages`);
-  }
-  for (const age of ages) {
-    appendOption(demographic, `age:${age}`, `Age ${age} · All genders`);
-  }
-  for (const segment of segments) {
-    appendOption(demographic, `segment:${segment.key}`, segment.label);
-  }
-  demographic.disabled = false;
-
   if (!state.initialSliceApplied) {
-    state.initialSliceApplied = true;
     const query = new URLSearchParams(window.location.search);
-    for (const [parameter, dimension, select] of [
-      ["audience", "publisher", audience],
-      ["demographic", "demographic", demographic],
-      ["device", "device", device],
-      ["os", "os", operatingSystem],
-    ]) {
-      const value = query.get(parameter);
-      if (value && [...select.options].some((option) => option.value === value)) {
-        select.value = value;
-        setActiveSlice(dimension, select);
-        break;
-      }
+    const value = query.get(config.parameter);
+    if (value && [...select.options].some((option) => option.value === value)) {
+      state.initialSliceApplied = true;
+      select.value = value;
+      setActiveSlice(dimension, select);
     }
   }
 }
@@ -1333,40 +1345,48 @@ function populateSliceControls() {
 function resetSlices() {
   state.activeSlice = null;
   state.slices = { publisher: null, demographic: null, device: null, os: null };
-  for (const id of [
-    "audienceSlice",
-    "demographicSlice",
-    "deviceSlice",
-    "osSlice",
-  ]) {
-    $(id).disabled = true;
-    $(id).value = "all";
+  state.sliceLoading.clear();
+  state.initialSliceApplied = false;
+  for (const config of Object.values(sliceControls)) {
+    const select = $(config.id);
+    select.replaceChildren();
+    appendOption(select, "all", config.label);
+    select.disabled = false;
   }
   $("sliceNotice").classList.add("hidden");
 }
 
-async function loadSlices(params) {
-  const query = params.toString();
+async function loadSlice(dimension, params = currentRangeParams()) {
+  if (state.slices[dimension] || state.sliceLoading.has(dimension)) return;
+  state.sliceLoading.add(dimension);
+  const config = sliceControls[dimension];
+  const select = $(config.id);
+  select.options[0].textContent = `${config.label} · loading…`;
   try {
-    const dimensions = ["publisher", "demographic", "device", "os"];
-    const responses = await Promise.all(
-      dimensions.map(async (dimension) => {
-        const response = await fetch(
-          `/api/slices?${query}&dimension=${dimension}`,
-        );
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || `${dimension} failed`);
-        return [dimension, data];
-      }),
+    const response = await fetch(
+      `/api/slices?${params.toString()}&dimension=${dimension}`,
     );
-    for (const [dimension, data] of responses) {
-      state.slices[dimension] = data;
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `${dimension} failed`);
+    const current = state.payload?.range;
+    if (
+      !current ||
+      current.since !== data.range.since ||
+      current.until !== data.range.until
+    ) {
+      return;
     }
-    populateSliceControls();
+    state.slices[dimension] = data;
+    populateSliceControl(dimension);
     if (state.detail?.tab === "insights") renderDetail();
   } catch (error) {
     warning.textContent = `${warning.textContent || ""} Slice filters unavailable: ${error.message}`.trim();
     warning.classList.remove("hidden");
+  } finally {
+    state.sliceLoading.delete(dimension);
+    if (!state.slices[dimension]) {
+      select.options[0].textContent = config.label;
+    }
   }
 }
 
@@ -1392,12 +1412,61 @@ function setActiveSlice(dimension, select) {
   render();
 }
 
+async function loadMedia(params = currentRangeParams()) {
+  const requestId = ++state.mediaRequest;
+  const expectedRange = state.payload?.range;
+  if (!expectedRange) return;
+  try {
+    const response = await fetch(`/api/creative-media?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Previews unavailable");
+    if (
+      requestId !== state.mediaRequest ||
+      state.payload?.range.since !== data.range.since ||
+      state.payload?.range.until !== data.range.until
+    ) {
+      return;
+    }
+    state.payload.creatives = state.payload.creatives.map((creative) => ({
+      ...creative,
+      media: data.creatives[creative.creativeId] || [],
+    }));
+    state.payload.dataHealth = data.dataHealth;
+    state.payload.warnings = [
+      ...new Set([...(state.payload.warnings || []), ...(data.warnings || [])]),
+    ];
+    if (state.detail) {
+      const updated = state.payload.creatives.find(
+        (creative) => creative.creativeId === state.detail.row.creativeId,
+      );
+      if (updated) {
+        state.detail.row = updated;
+        state.detail.selectedAdId ??= updated.media[0]?.adId ?? null;
+      }
+    }
+    renderDataHealth();
+    render();
+    if (state.analysis) renderAnalysis();
+    if (state.detail) renderDetail();
+    warning.textContent = state.payload.warnings.join(" ");
+    warning.classList.toggle("hidden", !state.payload.warnings.length);
+  } catch (error) {
+    if (requestId !== state.mediaRequest) return;
+    warning.textContent =
+      `${warning.textContent || ""} Preview enrichment unavailable: ${error.message}`.trim();
+    warning.classList.remove("hidden");
+  } finally {
+    if (requestId === state.mediaRequest) $("mediaType").disabled = false;
+  }
+}
+
 async function loadData(force = false) {
   if (state.loading) return;
   state.loading = true;
   loading.classList.remove("hidden");
   grid.innerHTML = "";
   warning.classList.add("hidden");
+  $("mediaType").disabled = true;
   resetSlices();
   try {
     const params = currentRangeParams(force);
@@ -1413,8 +1482,12 @@ async function loadData(force = false) {
       warning.textContent = data.warnings.join(" ");
       warning.classList.remove("hidden");
     }
-    void loadSlices(params);
-    void loadVideoMetrics(params);
+    void loadMedia(params);
+    const initialQuery = new URLSearchParams(window.location.search);
+    const initialSlice = Object.entries(sliceControls).find(
+      ([, config]) => initialQuery.get(config.parameter),
+    );
+    if (initialSlice) void loadSlice(initialSlice[0], params);
     if (!state.initialDetailApplied) {
       state.initialDetailApplied = true;
       const creativeId = new URLSearchParams(window.location.search).get(
@@ -1422,11 +1495,15 @@ async function loadData(force = false) {
       );
       if (creativeId) void openDetail(creativeId);
     }
-    if (state.page === "analysis") void loadAnalysis();
+    if (state.page === "analysis") {
+      void loadAnalysis();
+      void loadVideoMetrics(params);
+    }
   } catch (error) {
     warning.textContent = error.message;
     warning.classList.remove("hidden");
     grid.innerHTML = '<div class="empty-state">Could not load dashboard data.</div>';
+    $("mediaType").disabled = false;
   } finally {
     state.loading = false;
     loading.classList.add("hidden");
@@ -3493,7 +3570,15 @@ function switchPage(page) {
   document.querySelectorAll("[data-page]").forEach((button) => {
     button.classList.toggle("active", button.dataset.page === page);
   });
-  if (page === "analysis") void loadAnalysis();
+  if (page === "library" && !state.payload) void loadData();
+  if (page === "analysis") {
+    if (state.payload) {
+      void loadAnalysis();
+      if (!state.videoMetrics) void loadVideoMetrics();
+    } else {
+      void loadData();
+    }
+  }
   if (page === "inspiration") void loadCompetitors();
   if (page === "debrief") void loadDebrief();
 }
@@ -3572,6 +3657,11 @@ $("deviceSlice").addEventListener("change", (event) =>
 $("osSlice").addEventListener("change", (event) =>
   setActiveSlice("os", event.currentTarget),
 );
+for (const [dimension, config] of Object.entries(sliceControls)) {
+  for (const eventName of ["pointerenter", "focus"]) {
+    $(config.id).addEventListener(eventName, () => void loadSlice(dimension));
+  }
+}
 $("datePreset").addEventListener("change", () => {
   const custom = $("datePreset").value === "custom";
   $("customDates").classList.toggle("hidden", !custom);
@@ -3821,4 +3911,3 @@ switchPage(
     ? initialPage
     : "library",
 );
-void loadData();
