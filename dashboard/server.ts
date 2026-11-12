@@ -2957,11 +2957,11 @@ async function prewarmDashboardWindows(): Promise<void> {
   }
   dashboardPrewarmRunning = true;
   try {
-    for (const days of [7, 28, 90]) {
+    for (const days of [7, 28, 30, 90]) {
       const range = defaultDateRange(days);
       try {
         await refreshPayload(range);
-        if (days <= 28 && process.env.META_ACCESS_TOKEN?.trim()) {
+        if (days <= 30 && process.env.META_ACCESS_TOKEN?.trim()) {
           await refreshMediaPayload(range);
           for (const dimension of [
             "os",
