@@ -1,0 +1,31 @@
+name: Apply dashboard speed patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/dashboard-speed.patch.gz.b64
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply verified patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/dashboard-speed.patch.gz.b64 | gzip --decompress > /tmp/dashboard-speed.patch
+          git apply --check /tmp/dashboard-speed.patch
+          git apply /tmp/dashboard-speed.patch
+          rm .github/dashboard-speed.patch.gz.b64 .github/workflows/apply-dashboard-speed.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Speed up dashboard cold loading"
+          git push origin HEAD:main
