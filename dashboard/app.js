@@ -3370,6 +3370,9 @@ function renderAnalysis() {
   $("analysisCoverage").textContent =
     `${coverage.scanned} of ${coverage.total} creatives scanned` +
     (coverage.stale ? ` · ${coverage.stale} stale` : "") +
+    (coverage.fingerprintsValidated === false
+      ? " · media fingerprint check pending"
+      : "") +
     ` · ${state.analysis.model}` +
     (state.analysis.schedule?.enabled && state.analysis.schedule.nextRunAt
       ? ` · next daily scan ${new Date(state.analysis.schedule.nextRunAt).toLocaleString()} (cap ${integer(state.analysis.schedule.dailyLimit)})`

@@ -1124,7 +1124,12 @@ async function buildAnalysisPayload(range: {
 }): Promise<{
   available: boolean;
   model: string;
-  coverage: { scanned: number; stale: number; total: number };
+  coverage: {
+    scanned: number;
+    stale: number;
+    total: number;
+    fingerprintsValidated: boolean;
+  };
   schedule: {
     enabled: boolean;
     nextRunAt: string | null;
@@ -1140,7 +1145,20 @@ async function buildAnalysisPayload(range: {
     analysis: CreativeAnalysis | null;
   }>;
 }> {
-  const dashboard = await buildEnrichedPayload(range);
+  const baseDashboard = await buildPayload(range);
+  const cachedMedia = mediaCache.get(
+    `${range.since}:${range.until}`,
+  )?.value;
+  const fingerprintsValidated = Boolean(cachedMedia);
+  const dashboard: DashboardPayload = cachedMedia
+    ? {
+        ...baseDashboard,
+        creatives: baseDashboard.creatives.map((creative) => ({
+          ...creative,
+          media: cachedMedia.creatives[creative.creativeId] ?? [],
+        })),
+      }
+    : baseDashboard;
   const saved = new Map(
     (await analysisStore.list()).map((record) => [record.creativeId, record]),
   );
@@ -1156,6 +1174,7 @@ async function buildAnalysisPayload(range: {
       };
     }
     const current =
+      !fingerprintsValidated ||
       analysis.fingerprint === creativeFingerprint(creative);
     if (current) scanned += 1;
     else stale += 1;
@@ -1168,7 +1187,12 @@ async function buildAnalysisPayload(range: {
   return {
     available: Boolean(process.env.OPENAI_API_KEY?.trim()),
     model: process.env.OPENAI_ANALYSIS_MODEL?.trim() || "gpt-4.1-mini",
-    coverage: { scanned, stale, total: dashboard.creatives.length },
+    coverage: {
+      scanned,
+      stale,
+      total: dashboard.creatives.length,
+      fingerprintsValidated,
+    },
     schedule: {
       enabled: scanConfig.enabled,
       nextRunAt: nextScheduledScanAt,
