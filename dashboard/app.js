@@ -10,6 +10,7 @@ const state = {
   dataPollTimer: null,
   mediaPollTimer: null,
   mediaFreshness: null,
+  visibleCards: 60,
   selected: null,
   compareIds: new Set(),
   detail: null,
@@ -33,6 +34,8 @@ const state = {
   experiments: [],
   savedReports: [],
   testBriefs: [],
+  upstreamHealth: null,
+  experimentCreativeIds: new Set(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -350,8 +353,20 @@ function renderMetricDictionary() {
         <div><span>Mature D1 / D3 / D7</span><strong>${integer(health.coverage.matureD1Creatives)} / ${integer(health.coverage.matureD3Creatives)} / ${integer(health.coverage.matureD7Creatives)}</strong></div>
       </section>`
     : "";
+  const timingMarkup = state.upstreamHealth
+    ? `<section class="metric-health upstream-health">
+        <h3>Upstream timing</h3>
+        ${Object.entries(state.upstreamHealth.lanes)
+          .map(
+            ([lane, stats]) =>
+              `<div><span>${escapeHtml(lane)}</span><strong>${stats.lastDurationMs == null ? "Not called" : `${(stats.lastDurationMs / 1000).toFixed(1)}s`}</strong><small>${stats.running ? "Running" : stats.queued ? `${stats.queued} queued` : stats.lastLabel || "Idle"}</small></div>`,
+          )
+          .join("")}
+      </section>`
+    : "";
   $("metricDictionary").innerHTML =
     healthMarkup +
+    timingMarkup +
     `<div class="metric-definition-list">${metricDefinitions
       .map(
         ([metric, source, definition]) => `<section>
@@ -361,6 +376,17 @@ function renderMetricDictionary() {
         </section>`,
       )
       .join("")}</div>`;
+}
+
+async function loadUpstreamHealth() {
+  try {
+    const response = await fetch("/api/upstream-health");
+    const data = await response.json();
+    if (response.ok) state.upstreamHealth = data;
+  } catch {
+    // Metric definitions remain available if diagnostics fail.
+  }
+  renderMetricDictionary();
 }
 
 function renderCompareTray() {
@@ -595,25 +621,60 @@ function populateExperimentLinks() {
     briefSelect.value = selectedBrief;
   }
 
-  const creativeSelect = $("experimentCreativeIds");
-  const selectedCreatives = new Set(
-    [...creativeSelect.selectedOptions].map((option) => option.value),
-  );
-  creativeSelect.replaceChildren();
-  const creatives = [...(state.debrief?.all || [])].sort(
+  renderExperimentCreativePicker();
+}
+
+function experimentCreativeOptions() {
+  return [...(state.debrief?.all || [])].sort(
     (a, b) =>
       (b.uploadedDate || "").localeCompare(a.uploadedDate || "") ||
       b.testing.spend - a.testing.spend,
   );
-  for (const creative of creatives) {
-    const option = document.createElement("option");
-    option.value = experimentCreativeId(creative);
-    option.textContent =
-      `${creative.readableName || creative.name} · ${creative.verdict} · ` +
-      money(creative.testing.spend, true);
-    option.selected = selectedCreatives.has(option.value);
-    creativeSelect.append(option);
-  }
+}
+
+function renderExperimentCreativePicker() {
+  const creatives = experimentCreativeOptions();
+  const byId = new Map(
+    creatives.map((creative) => [experimentCreativeId(creative), creative]),
+  );
+  $("experimentCreativeChips").innerHTML =
+    [...state.experimentCreativeIds]
+      .map((creativeId) => {
+        const creative = byId.get(creativeId);
+        return `<button type="button" data-remove-experiment-creative="${escapeHtml(creativeId)}"><span>${escapeHtml(creative?.readableName || creative?.name || creativeId)}</span><small>${escapeHtml(creative?.verdict || "Outside window")}</small> ×</button>`;
+      })
+      .join("") ||
+    '<span class="experiment-picker-empty">No creatives linked yet.</span>';
+
+  const query = $("experimentCreativeSearch").value.trim().toLowerCase();
+  const allMatches = creatives.filter((creative) => {
+      const id = experimentCreativeId(creative);
+      if (state.experimentCreativeIds.has(id)) return false;
+      const haystack = [
+        creative.name,
+        creative.readableName,
+        creative.source,
+        creative.verdict,
+        creative.category,
+        id,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return !query || haystack.includes(query);
+    });
+  const matches = allMatches.slice(0, 12);
+  $("experimentCreativeResults").innerHTML =
+    (matches
+      .map((creative) => {
+        const id = experimentCreativeId(creative);
+        return `<button type="button" data-add-experiment-creative="${escapeHtml(id)}"><strong>${escapeHtml(creative.readableName || creative.name)}</strong><small>${escapeHtml(creative.source)} · ${escapeHtml(creative.verdict)} · ${money(creative.testing.spend, true)}</small></button>`;
+      })
+      .join("") ||
+      '<span class="experiment-picker-empty">No matching creatives.</span>') +
+    (allMatches.length > matches.length
+      ? `<span class="experiment-picker-count">Showing 12 of ${allMatches.length}; refine your search.</span>`
+      : "");
 }
 
 function experimentOutcome(experiment) {
@@ -727,9 +788,8 @@ async function loadExperiments() {
 function clearExperimentForm() {
   $("experimentForm").reset();
   $("experimentId").value = "";
-  [...$("experimentCreativeIds").options].forEach(
-    (option) => (option.selected = false),
-  );
+  state.experimentCreativeIds.clear();
+  renderExperimentCreativePicker();
 }
 
 async function saveExperiment(event) {
@@ -744,9 +804,7 @@ async function saveExperiment(event) {
     variants: $("experimentVariants").value,
     primaryMetric: $("experimentPrimaryMetric").value,
     guardrails: $("experimentGuardrails").value,
-    creativeIds: [...$("experimentCreativeIds").selectedOptions].map(
-      (option) => option.value,
-    ),
+    creativeIds: [...state.experimentCreativeIds],
     testBriefId: $("experimentTestBrief").value || null,
     notes: $("experimentNotes").value,
   };
@@ -762,11 +820,18 @@ async function saveExperiment(event) {
 }
 
 function render() {
-  const rows = filteredRows();
-  $("resultCount").textContent = `${rows.length} of ${
-    state.payload?.creatives.length ?? 0
-  } results`;
-  if (!rows.length) {
+  const filtered = filteredRows();
+  const rows = filtered.slice(0, state.visibleCards);
+  $("resultCount").textContent =
+    `${rows.length} shown · ${filtered.length} matching · ` +
+    `${state.payload?.creatives.length ?? 0} total`;
+  $("loadMoreCreatives").classList.toggle(
+    "hidden",
+    rows.length >= filtered.length,
+  );
+  $("loadMoreCreatives").textContent =
+    `Show ${Math.min(60, filtered.length - rows.length)} more`;
+  if (!filtered.length) {
     grid.innerHTML =
       '<div class="empty-state">No creatives match these filters.</div>';
     return;
@@ -1567,6 +1632,7 @@ function setActiveSlice(dimension, select) {
           value,
           label: select.options[select.selectedIndex]?.text || value,
         };
+  state.visibleCards = 60;
   renderSummary();
   render();
 }
@@ -1690,6 +1756,7 @@ async function loadData(force = false) {
   if (state.mediaPollTimer) clearTimeout(state.mediaPollTimer);
   state.mediaRequest += 1;
   state.mediaFreshness = null;
+  state.visibleCards = 60;
   loading.classList.remove("hidden");
   grid.innerHTML = "";
   warning.classList.add("hidden");
@@ -3873,10 +3940,18 @@ async function pollScan(jobId) {
   }
 }
 
+const resetGridAndRender = () => {
+  state.visibleCards = 60;
+  render();
+};
 ["sortMetric", "mediaType", "performanceSlice", "minimumSpend"].forEach((id) =>
-  $(id).addEventListener("change", render),
+  $(id).addEventListener("change", resetGridAndRender),
 );
-$("searchInput").addEventListener("input", render);
+$("searchInput").addEventListener("input", resetGridAndRender);
+$("loadMoreCreatives").addEventListener("click", () => {
+  state.visibleCards += 60;
+  render();
+});
 $("audienceSlice").addEventListener("change", (event) =>
   setActiveSlice("publisher", event.currentTarget),
 );
@@ -3921,6 +3996,7 @@ $("clearCompareButton").addEventListener("click", () => {
   button.addEventListener("click", () => {
     renderMetricDictionary();
     $("metricDictionaryDialog").showModal();
+    void loadUpstreamHealth();
   });
 });
 $("closeMetricDictionary").addEventListener("click", () =>
@@ -3954,6 +4030,25 @@ $("experimentForm").addEventListener("submit", (event) =>
   void saveExperiment(event).catch((error) => window.alert(error.message)),
 );
 $("clearExperimentForm").addEventListener("click", clearExperimentForm);
+$("experimentCreativeSearch").addEventListener(
+  "input",
+  renderExperimentCreativePicker,
+);
+$("experimentCreativeResults").addEventListener("click", (event) => {
+  const creativeId = event.target.closest("[data-add-experiment-creative]")
+    ?.dataset.addExperimentCreative;
+  if (!creativeId) return;
+  state.experimentCreativeIds.add(creativeId);
+  $("experimentCreativeSearch").value = "";
+  renderExperimentCreativePicker();
+});
+$("experimentCreativeChips").addEventListener("click", (event) => {
+  const creativeId = event.target.closest("[data-remove-experiment-creative]")
+    ?.dataset.removeExperimentCreative;
+  if (!creativeId) return;
+  state.experimentCreativeIds.delete(creativeId);
+  renderExperimentCreativePicker();
+});
 $("experimentList").addEventListener("click", (event) => {
   const editId = event.target.closest("[data-edit-experiment]")?.dataset
     .editExperiment;
@@ -3970,10 +4065,9 @@ $("experimentList").addEventListener("click", (event) => {
     $("experimentPrimaryMetric").value = experiment.primaryMetric;
     $("experimentGuardrails").value = experiment.guardrails;
     $("experimentTestBrief").value = experiment.testBriefId || "";
-    const linked = new Set(experiment.creativeIds || []);
-    [...$("experimentCreativeIds").options].forEach(
-      (option) => (option.selected = linked.has(option.value)),
-    );
+    state.experimentCreativeIds = new Set(experiment.creativeIds || []);
+    $("experimentCreativeSearch").value = "";
+    renderExperimentCreativePicker();
     $("experimentNotes").value = experiment.notes;
     return;
   }

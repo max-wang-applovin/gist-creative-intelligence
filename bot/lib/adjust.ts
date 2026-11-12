@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { FIXTURE_ADJUST_ROWS } from "./fixtures.js";
 import { normalizeCreativeName } from "./names.js";
 import type { AdjustCreativeRow, DataSource, DateRange } from "./types.js";
@@ -215,6 +218,216 @@ export async function fetchAdjustReportRows(
   return payload.rows ?? payload.data ?? [];
 }
 
+type DailyReportCache = {
+  version: 1;
+  days: Record<
+    string,
+    { savedAt: string; rows: AdjustReportRow[] }
+  >;
+};
+
+const adjustDailyDirectory = resolve(
+  process.env.DASHBOARD_DATA_DIR?.trim() || ".agent-serve",
+  "adjust-daily",
+);
+const dailyReportMemory = new Map<
+  string,
+  { path: string; value: DailyReportCache }
+>();
+const dailyReportInflight = new Map<
+  string,
+  Promise<AdjustReportRow[]>
+>();
+const dailyReportTails = new Map<string, Promise<void>>();
+
+function reportDays(range: DateRange): string[] {
+  const days: string[] = [];
+  const cursor = new Date(`${range.since}T00:00:00Z`);
+  const until = new Date(`${range.until}T00:00:00Z`);
+  while (cursor <= until) {
+    days.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return days;
+}
+
+function contiguousRanges(days: string[]): DateRange[] {
+  const ranges: DateRange[] = [];
+  for (const day of days.sort()) {
+    const previous = ranges.at(-1);
+    if (!previous) {
+      ranges.push({ since: day, until: day });
+      continue;
+    }
+    const next = new Date(`${previous.until}T00:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    if (next.toISOString().slice(0, 10) === day) {
+      previous.until = day;
+    } else {
+      ranges.push({ since: day, until: day });
+    }
+  }
+  return ranges;
+}
+
+function dailyEntryFresh(
+  day: string,
+  entry: { savedAt: string; rows: AdjustReportRow[] },
+): boolean {
+  const saved = Date.parse(entry.savedAt);
+  if (!Number.isFinite(saved)) return false;
+  const ageDays = Math.floor(
+    (Date.now() - Date.parse(`${day}T00:00:00Z`)) / 86_400_000,
+  );
+  const normalTtl =
+    ageDays <= 7 ? 15 * 60_000 : 24 * 60 * 60_000;
+  const ttl = entry.rows.length === 0
+    ? Math.min(normalTtl, 5 * 60_000)
+    : normalTtl;
+  return saved + ttl > Date.now();
+}
+
+function recentReportDay(day: string): boolean {
+  return (
+    Math.floor(
+      (Date.now() - Date.parse(`${day}T00:00:00Z`)) /
+        86_400_000,
+    ) <= 7
+  );
+}
+
+async function readDailyReportCache(
+  key: string,
+): Promise<{ path: string; value: DailyReportCache }> {
+  const remembered = dailyReportMemory.get(key);
+  if (remembered) return remembered;
+  const path = join(adjustDailyDirectory, `${key}.json`);
+  let value: DailyReportCache = { version: 1, days: {} };
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as DailyReportCache;
+    if (parsed.version === 1 && parsed.days) value = parsed;
+  } catch {
+    // The first successful read creates this query's daily cache.
+  }
+  const loaded = { path, value };
+  dailyReportMemory.set(key, loaded);
+  return loaded;
+}
+
+async function writeDailyReportCache(
+  path: string,
+  value: DailyReportCache,
+): Promise<void> {
+  const recentDays = Object.entries(value.days)
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .slice(0, 200);
+  value.days = Object.fromEntries(recentDays);
+  await mkdir(adjustDailyDirectory, { recursive: true });
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(value)}\n`, {
+    mode: 0o600,
+  });
+  await rename(temporary, path);
+}
+
+/**
+ * Persist Library report rows by UTC day. Overlapping 7/28/90-day windows
+ * reuse daily partitions and only fetch missing or expired days.
+ */
+export async function fetchAdjustDailyCachedRows(
+  apiToken: string,
+  appToken: string,
+  range: DateRange,
+  dimensions: string[],
+  metrics: string[],
+  label = "Adjust Report API",
+  force = false,
+): Promise<AdjustReportRow[]> {
+  const cacheIdentity = JSON.stringify({
+    appToken,
+    dimensions: [...dimensions].sort(),
+    metrics: [...metrics].sort(),
+  });
+  const key = createHash("sha256")
+    .update(cacheIdentity)
+    .digest("hex")
+    .slice(0, 24);
+  const inflightKey = `${key}:${range.since}:${range.until}:${force}`;
+  const pending = dailyReportInflight.get(inflightKey);
+  if (pending) return pending;
+  const prior = dailyReportTails.get(key) ?? Promise.resolve();
+  const promise = prior.catch(() => undefined).then(async () => {
+    const cache = await readDailyReportCache(key);
+    const days = reportDays(range);
+    const missing = days.filter(
+      (day) =>
+        force ||
+        !cache.value.days[day] ||
+        !dailyEntryFresh(day, cache.value.days[day]!),
+    );
+    const queryDimensions = [
+      "day",
+      ...dimensions.filter((dimension) => dimension !== "day"),
+    ];
+    for (const segment of contiguousRanges(missing)) {
+      const rows = await fetchAdjustReportRows(
+        apiToken,
+        appToken,
+        segment,
+        queryDimensions,
+        metrics,
+        label,
+      );
+      const byDay = new Map<string, AdjustReportRow[]>(
+        reportDays(segment).map((day) => [day, []]),
+      );
+      const invalidRows: AdjustReportRow[] = [];
+      for (const row of rows) {
+        const day =
+          row.day && byDay.has(row.day)
+            ? row.day
+            : segment.since === segment.until
+              ? segment.since
+              : null;
+        if (day) byDay.get(day)!.push(row);
+        else invalidRows.push(row);
+      }
+      if (invalidRows.length > 0) {
+        for (const day of missing) delete cache.value.days[day];
+        return fetchAdjustReportRows(
+          apiToken,
+          appToken,
+          range,
+          dimensions,
+          metrics,
+          `${label} uncached fallback`,
+        );
+      }
+      const savedAt = new Date().toISOString();
+      for (const [day, dayRows] of byDay) {
+        if (dayRows.length === 0 && recentReportDay(day)) {
+          delete cache.value.days[day];
+        } else {
+          cache.value.days[day] = { savedAt, rows: dayRows };
+        }
+      }
+    }
+    if (missing.length > 0) {
+      await writeDailyReportCache(cache.path, cache.value);
+    }
+    return days.flatMap((day) => cache.value.days[day]?.rows ?? []);
+  }).finally(() => dailyReportInflight.delete(inflightKey));
+  dailyReportInflight.set(inflightKey, promise);
+  dailyReportTails.set(
+    key,
+    promise.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return promise;
+}
+
 export function isMetaPartner(partner: string): boolean {
   const p = partner.toLowerCase();
   return (
@@ -379,6 +592,7 @@ export function rollupAdjustByCreative(
 export type FetchAdjustOptions = {
   appToken?: string;
   appName?: string;
+  force?: boolean;
   /** Default Facebook/Meta only (matches Gist helper Meta creative reports). */
   partner?: "meta" | "all";
 };
@@ -417,7 +631,7 @@ export async function fetchAdjustCreativePerformance(
   const app = resolveApp(appsAvailable, opts);
 
   const [raw, retentionRows] = await Promise.all([
-    fetchAdjustReportRows(
+    fetchAdjustDailyCachedRows(
       apiToken,
       app.token,
       range,
@@ -429,18 +643,18 @@ export async function fetchAdjustCreativePerformance(
         "clicks",
         "revenue",
         "roas",
-        "retention_rate_d1",
-        "retention_rate_d3",
-        "retention_rate_d7",
       ],
+      "Adjust creative performance",
+      opts.force === true,
     ),
-    fetchAdjustReportRows(
+    fetchAdjustDailyCachedRows(
       apiToken,
       app.token,
       range,
       ["day", "creative_id_network", "creative", "partner_name"],
       ["installs", "retained_users_d1", "retained_users_d3", "retained_users_d7"],
       "Adjust retention cohorts",
+      opts.force === true,
     ),
   ]);
   const mapped: AdjustCreativeRow[] = [];

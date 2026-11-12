@@ -114,6 +114,7 @@ select:focus, input:focus { border-color: var(--accent); }
 .slice-notice { margin: 14px 0; border: 1px solid rgba(99,214,162,.28); color: #a9e9cd; background: var(--accent-soft); border-radius: 8px; padding: 10px 12px; font-size: 12px; }
 
 .creative-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
+.load-more-creatives { display: block; min-width: 180px; margin: 18px auto 4px; }
 .creative-card {
   position: relative; min-width: 0; overflow: hidden;
   border: 1px solid var(--border-soft); border-radius: 14px; background: var(--card);
@@ -450,6 +451,8 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
 .metric-health div { padding: 8px; border-radius: 7px; background: #f4f7fb; }
 .metric-health span { display: block; color: #75808b; font-size: 8px; text-transform: uppercase; }
 .metric-health strong { display: block; margin-top: 3px; font-size: 11px; text-transform: capitalize; }
+.upstream-health { grid-template-columns: repeat(4, minmax(0,1fr)); }
+.upstream-health small { display: block; margin-top: 3px; color: #75808b; font-size: 8px; }
 .metric-definition-list { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .metric-definition-list section { padding: 12px; border: 1px solid #dfe3e7; border-radius: 9px; background: white; }
 .metric-definition-list h3 { margin: 0; font-size: 12px; }
@@ -464,8 +467,16 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
 .experiment-form .wide { grid-column: 1 / -1; }
 .experiment-form input, .experiment-form textarea, .experiment-form select { width: 100%; border: 1px solid #d5dbe2; border-radius: 7px; padding: 8px; background: white; color: #222a32; }
 .experiment-form textarea { min-height: 74px; resize: vertical; }
-.experiment-form select[multiple] { min-height: 150px; padding: 4px; }
 .experiment-form label > small { color: #737d87; font-size: 9px; font-weight: 500; }
+.experiment-creative-results { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 6px; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid #dfe3e7; border-radius: 8px; background: #f7f9fb; }
+.experiment-creative-results button { display: grid; gap: 3px; border: 1px solid #d8dee5; border-radius: 7px; padding: 7px; background: white; color: #27313b; text-align: left; }
+.experiment-creative-results button:hover { border-color: #3478df; }
+.experiment-creative-results small { color: #737d87; font-size: 8px; }
+.experiment-creative-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.experiment-creative-chips button { display: flex; align-items: center; gap: 5px; border: 0; border-radius: 999px; padding: 5px 8px; background: #e7effd; color: #315f9f; font-size: 9px; }
+.experiment-creative-chips button small { color: #677f9f; }
+.experiment-picker-empty { color: #7c8791; font-size: 10px; }
+.experiment-picker-count { grid-column: 1 / -1; color: #7c8791; font-size: 9px; }
 .experiment-actions { display: flex; gap: 8px; }
 .experiment-warning, .experiment-ready { display: inline-block; margin: 2px; border-radius: 999px; padding: 3px 7px; font-size: 8px; font-weight: 750; white-space: nowrap; }
 .experiment-warning { background: #fdf1de; color: #9a5d0c; }
@@ -585,6 +596,7 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .metric-health h3 { grid-column: 1; }
   .experiment-form { grid-template-columns: 1fr; }
   .experiment-form .wide { grid-column: 1; }
+  .experiment-creative-results { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   .creative-grid { grid-template-columns: 1fr; }

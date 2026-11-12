@@ -10,6 +10,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { defaultDateRange } from "../bot/lib/dates.js";
 import { normalizeCreativeName } from "../bot/lib/names.js";
+import { runUpstreamTask } from "./upstream.js";
 
 export const DEFAULT_DEBRIEF_DAYS = 14 * 7;
 const MAX_DEBRIEF_DAYS = 180;
@@ -926,36 +927,52 @@ async function buildDebrief(range: {
   until: string;
 }): Promise<DebriefPayload> {
   const warnings: string[] = [];
-  const { apiToken, app } = await resolveAdjustApp();
-  const [deliveryRows, retentionRows, metaInventory] = await Promise.all([
-    fetchAdjustReportRows(
-      apiToken,
-      app.token,
-      range,
-      ["partner_name", "campaign_network", "adgroup_network", "creative_network"],
-      [
-        "network_cost",
-        "impressions",
-        "clicks",
-        "installs",
-        "post_install_account_created_events",
-      ],
+  const { apiToken, app } = await runUpstreamTask(
+    "adjust",
+    "resolve Adjust app",
+    () => resolveAdjustApp(),
+  );
+  const [[deliveryRows, retentionRows], metaInventory] = await Promise.all([
+    runUpstreamTask(
+      "adjust",
+      `debrief reports ${range.since}:${range.until}`,
+      () =>
+        Promise.all([
+          fetchAdjustReportRows(
+            apiToken,
+            app.token,
+            range,
+            [
+              "partner_name",
+              "campaign_network",
+              "adgroup_network",
+              "creative_network",
+            ],
+            [
+              "network_cost",
+              "impressions",
+              "clicks",
+              "installs",
+              "post_install_account_created_events",
+            ],
+          ),
+          fetchAdjustReportRows(
+            apiToken,
+            app.token,
+            range,
+            ["day", "partner_name", "campaign_network", "creative_network"],
+            [
+              "installs",
+              "network_cost",
+              "retained_users_d1",
+              "retained_users_d3",
+              "retained_users_d7",
+            ],
+            "Adjust retention cohorts",
+          ),
+        ]),
     ),
-    fetchAdjustReportRows(
-      apiToken,
-      app.token,
-      range,
-      ["day", "partner_name", "campaign_network", "creative_network"],
-      [
-        "installs",
-        "network_cost",
-        "retained_users_d1",
-        "retained_users_d3",
-        "retained_users_d7",
-      ],
-      "Adjust retention cohorts",
-    ),
-    fetchMetaAdInventory(),
+    runUpstreamTask("meta", "debrief ad inventory", fetchMetaAdInventory),
   ]);
   const metaAds = metaInventory.ads;
   if (metaInventory.warning) warnings.push(metaInventory.warning);

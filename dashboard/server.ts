@@ -45,6 +45,10 @@ import {
   resolveDebriefRange,
 } from "./debrief.js";
 import { WorkspaceStore } from "./workspace.js";
+import {
+  runUpstreamTask,
+  upstreamTimingSnapshot,
+} from "./upstream.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "..");
@@ -167,7 +171,11 @@ async function competitorFeed(force = false): Promise<
       // Missing or stale disk cache falls through to a live read.
     }
   }
-  const value = await fetchAdjacentCompetitorCreatives();
+  const value = await runUpstreamTask(
+    "adscan",
+    "competitor feed",
+    fetchAdjacentCompetitorCreatives,
+  );
   competitorCache = {
     expiresAt: Date.now() + 6 * 60 * 60_000,
     value,
@@ -236,8 +244,9 @@ type MediaPayload = {
 };
 
 type CacheEntry = { expiresAt: number; value: DashboardPayload };
-const DASHBOARD_CACHE_TTL_MS = 5 * 60_000;
+const DASHBOARD_CACHE_TTL_MS = 15 * 60_000;
 const MEDIA_CACHE_TTL_MS = 10 * 60_000;
+const SLICE_CACHE_TTL_MS = 30 * 60_000;
 const SNAPSHOTS_PER_KIND = 24;
 const dashboardSnapshotDirectory = join(dataDirectory, "dashboard-cache");
 const dataCache = new Map<string, CacheEntry>();
@@ -249,6 +258,7 @@ const mediaCache = new Map<
 const mediaInflight = new Map<string, Promise<MediaPayload>>();
 const previewCache = new Map<string, { expiresAt: number; src: string }>();
 const sliceCache = new Map<string, { expiresAt: number; value: SlicePayload }>();
+const sliceInflight = new Map<string, Promise<SlicePayload>>();
 const detailCache = new Map<
   string,
   {
@@ -260,17 +270,36 @@ const videoCache = new Map<
   string,
   { expiresAt: number; value: VideoMetricsPayload }
 >();
+const AD_MEDIA_CACHE_TTL_MS = 6 * 60 * 60_000;
+const ADMANAGE_ENRICHMENT_TTL_MS = 60 * 60_000;
+const AD_MEDIA_CACHE_LIMIT = 5_000;
+const adMediaCachePath = join(
+  dashboardSnapshotDirectory,
+  "ad-media-v1.json",
+);
+const adMediaStore = new Map<
+  string,
+  { savedAt: number; media: MetaAdMedia }
+>();
+let adMediaLoadPromise: Promise<void> | null = null;
+let adMediaWriteTail: Promise<void> = Promise.resolve();
+let adManageLastFetchAt = 0;
+
+type PayloadSnapshotKind =
+  | "metrics"
+  | "media"
+  | `slice-${MetaBreakdownDimension}`;
 
 type PayloadSnapshot<T> = {
   version: 1;
-  kind: "metrics" | "media";
+  kind: PayloadSnapshotKind;
   savedAt: string;
   range: { since: string; until: string };
   value: T;
 };
 
 function payloadSnapshotPath(
-  kind: "metrics" | "media",
+  kind: PayloadSnapshotKind,
   range: { since: string; until: string },
 ): string {
   return join(
@@ -280,7 +309,7 @@ function payloadSnapshotPath(
 }
 
 async function readPayloadSnapshot<T extends { generatedAt: string }>(
-  kind: "metrics" | "media",
+  kind: PayloadSnapshotKind,
   range: { since: string; until: string },
 ): Promise<{ savedAt: number; value: T } | null> {
   try {
@@ -305,7 +334,7 @@ async function readPayloadSnapshot<T extends { generatedAt: string }>(
 }
 
 async function writePayloadSnapshot<T>(
-  kind: "metrics" | "media",
+  kind: PayloadSnapshotKind,
   range: { since: string; until: string },
   value: T,
 ): Promise<void> {
@@ -335,6 +364,75 @@ async function writePayloadSnapshot<T>(
   );
 }
 
+function loadAdMediaStore(): Promise<void> {
+  if (adMediaLoadPromise) return adMediaLoadPromise;
+  adMediaLoadPromise = (async () => {
+    try {
+      const parsed = JSON.parse(
+        await readFile(adMediaCachePath, "utf8"),
+      ) as {
+        version: 1;
+        entries: Record<
+          string,
+          { savedAt: string; media: MetaAdMedia }
+        >;
+      };
+      if (parsed.version !== 1 || !parsed.entries) return;
+      for (const [adId, entry] of Object.entries(parsed.entries)) {
+        const savedAt = Date.parse(entry.savedAt);
+        if (
+          /^\d+$/.test(adId) &&
+          Number.isFinite(savedAt) &&
+          entry.media?.adId === adId
+        ) {
+          adMediaStore.set(adId, { savedAt, media: entry.media });
+        }
+      }
+    } catch {
+      // The first successful media refresh creates the cache.
+    }
+  })();
+  return adMediaLoadPromise;
+}
+
+function persistAdMediaStore(): Promise<void> {
+  adMediaWriteTail = adMediaWriteTail
+    .catch(() => undefined)
+    .then(async () => {
+      await mkdir(dashboardSnapshotDirectory, { recursive: true });
+      const entries = [...adMediaStore.entries()]
+        .sort((a, b) => b[1].savedAt - a[1].savedAt)
+        .slice(0, AD_MEDIA_CACHE_LIMIT);
+      const value = {
+        version: 1 as const,
+        entries: Object.fromEntries(
+          entries.map(([adId, entry]) => [
+            adId,
+            {
+              savedAt: new Date(entry.savedAt).toISOString(),
+              media: entry.media,
+            },
+          ]),
+        ),
+      };
+      const temporary = `${adMediaCachePath}.${process.pid}.${Date.now()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(value)}\n`, {
+        mode: 0o600,
+      });
+      await rename(temporary, adMediaCachePath);
+      const retained = new Set(
+        [...adMediaStore.entries()]
+          .sort((a, b) => b[1].savedAt - a[1].savedAt)
+          .slice(0, AD_MEDIA_CACHE_LIMIT)
+          .map(([adId]) => adId),
+      );
+      for (const adId of adMediaStore.keys()) {
+        if (!retained.has(adId)) adMediaStore.delete(adId);
+      }
+    });
+  return adMediaWriteTail;
+}
+
 type DeliveryMetrics = {
   spend: number;
   impressions: number;
@@ -357,6 +455,7 @@ type SliceSegment = {
 };
 
 type SlicePayload = {
+  generatedAt: string;
   dimension: MetaBreakdownDimension;
   range: { since: string; until: string };
   segments: SliceSegment[];
@@ -480,15 +579,21 @@ function resolveRange(url: URL): { since: string; until: string } {
 async function refreshPayload(range: {
   since: string;
   until: string;
-}): Promise<DashboardPayload> {
+}, forceAdjust = false): Promise<DashboardPayload> {
   const key = `${range.since}:${range.until}`;
   const pending = dataInflight.get(key);
   if (pending) return pending;
 
   const promise = (async () => {
-    const adjust = await fetchAdjustCreativePerformance(range, {
-      partner: "meta",
-    });
+    const adjust = await runUpstreamTask(
+      "adjust",
+      `creative metrics ${range.since}:${range.until}`,
+      () =>
+        fetchAdjustCreativePerformance(range, {
+          partner: "meta",
+          force: forceAdjust,
+        }),
+    );
     const board = buildHelperCompatibleDashboard(adjust.rows, maxScanLimit);
     const creatives: ApiCreative[] = board.map((row) => ({
       ...row,
@@ -577,7 +682,7 @@ async function buildPayload(
   force = false,
 ): Promise<DashboardPayload> {
   if (force) {
-    const value = await refreshPayload(range);
+    const value = await refreshPayload(range, true);
     return withPayloadFreshness(
       value,
       "live",
@@ -630,36 +735,96 @@ async function buildPayload(
 
 async function refreshMediaPayload(
   range: { since: string; until: string },
+  force = false,
 ): Promise<MediaPayload> {
   const key = `${range.since}:${range.until}`;
   const pending = mediaInflight.get(key);
   if (pending) return pending;
 
   const promise = (async () => {
-    const dashboard = await buildPayload(range);
+    const currentMetrics = dataCache.get(key)?.value;
+    const metricsAreRecent =
+      currentMetrics &&
+      Date.now() - Date.parse(currentMetrics.generatedAt) < 60_000;
+    const dashboard = await buildPayload(
+      range,
+      force && !metricsAreRecent,
+    );
     const adIds = [
       ...new Set(dashboard.creatives.flatMap((creative) => creative.adIds)),
     ];
+    await loadAdMediaStore();
+    let mediaStoreChanged = false;
+    const priorPayload = mediaCache.get(key)?.value;
+    const priorSavedAt = Date.parse(priorPayload?.generatedAt ?? "");
+    if (Number.isFinite(priorSavedAt)) {
+      for (const media of Object.values(priorPayload?.creatives ?? {}).flat()) {
+        if (!adMediaStore.has(media.adId)) {
+          adMediaStore.set(media.adId, { savedAt: priorSavedAt, media });
+          mediaStoreChanged = true;
+        }
+      }
+    }
+    const now = Date.now();
+    const idsToFetch = force
+      ? adIds
+      : adIds.filter((adId) => {
+          const cached = adMediaStore.get(adId);
+          return (
+            !cached ||
+            cached.savedAt + AD_MEDIA_CACHE_TTL_MS <= now
+          );
+        });
+    const mediaByAd: Record<string, MetaAdMedia> = Object.fromEntries(
+      adIds.flatMap((adId) => {
+        const cached = adMediaStore.get(adId);
+        return cached ? [[adId, { ...cached.media }]] : [];
+      }),
+    );
     const adManageConfigured = Boolean(
       process.env.ADMANAGE_API_KEY?.trim(),
     );
+    const needsAssetEnrichment =
+      force ||
+      idsToFetch.length > 0 ||
+      (now - adManageLastFetchAt >= ADMANAGE_ENRICHMENT_TTL_MS &&
+        Object.values(mediaByAd).some(
+          (media) =>
+            !media.videoUrl || (media.thumbnailWidth ?? 0) < 1_000,
+        ));
     const [metaResult, assetResult] = await Promise.allSettled([
-      fetchMetaAdMedia(adIds),
-      adManageConfigured
-        ? fetchAdManageAssets(range)
+      idsToFetch.length > 0
+        ? runUpstreamTask(
+            "meta",
+            `creative media ${idsToFetch.length}/${adIds.length} ads`,
+            () => fetchMetaAdMedia(idsToFetch),
+          )
+        : Promise.resolve({}),
+      adManageConfigured && needsAssetEnrichment
+        ? runUpstreamTask("admanage", "asset enrichment", () =>
+            fetchAdManageAssets(range),
+          )
         : Promise.resolve({}),
     ]);
     const warnings: string[] = [];
     const metaFailed = metaResult.status === "rejected";
     const adManageFailed =
       adManageConfigured && assetResult.status === "rejected";
-    const mediaByAd =
-      metaResult.status === "fulfilled" ? metaResult.value : {};
 
     if (metaResult.status === "rejected") {
       warnings.push(
         `Media previews unavailable: ${metaResult.reason instanceof Error ? metaResult.reason.message : String(metaResult.reason)}`,
       );
+    } else {
+      const fetchedMedia = metaResult.value as Record<
+        string,
+        MetaAdMedia
+      >;
+      for (const [adId, media] of Object.entries(fetchedMedia)) {
+        mediaByAd[adId] = media;
+        adMediaStore.set(adId, { savedAt: now, media });
+        mediaStoreChanged = true;
+      }
     }
     if (assetResult.status === "fulfilled") {
       const assets = assetResult.value as Awaited<
@@ -679,11 +844,25 @@ async function refreshMediaPayload(
             media.thumbnailUrl = asset.thumbnailUrl;
           }
         }
+        adMediaStore.set(adId, { savedAt: now, media: { ...media } });
+        mediaStoreChanged = true;
+      }
+      if (adManageConfigured && needsAssetEnrichment) {
+        adManageLastFetchAt = now;
       }
     } else {
       warnings.push(
         `High-resolution asset fallback unavailable: ${assetResult.reason instanceof Error ? assetResult.reason.message : String(assetResult.reason)}`,
       );
+    }
+    if (mediaStoreChanged) {
+      try {
+        await persistAdMediaStore();
+      } catch (error) {
+        warnings.push(
+          `Incremental media cache unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     const creatives = Object.fromEntries(
@@ -762,7 +941,7 @@ async function buildMediaPayload(
   force = false,
 ): Promise<MediaPayload> {
   if (force) {
-    const value = await refreshMediaPayload(range);
+    const value = await refreshMediaPayload(range, true);
     return withPayloadFreshness(
       value,
       "live",
@@ -1103,9 +1282,14 @@ async function buildVideoMetricsPayload(
   const cached = videoCache.get(cacheKey);
   if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
   const dashboard = await buildPayload(range);
-  const byAd = await fetchMetaVideoMetrics(
-    range,
-    dashboard.creatives.flatMap((creative) => creative.adIds),
+  const byAd = await runUpstreamTask(
+    "meta",
+    `video metrics ${range.since}:${range.until}`,
+    () =>
+      fetchMetaVideoMetrics(
+        range,
+        dashboard.creatives.flatMap((creative) => creative.adIds),
+      ),
   );
   const creatives: Record<string, CreativeVideoMetrics> = {};
   for (const creative of dashboard.creatives) {
@@ -1209,14 +1393,11 @@ function segmentIdentity(
   };
 }
 
-async function buildSlicePayload(
+async function computeSlicePayload(
   range: { since: string; until: string },
   dimension: MetaBreakdownDimension,
-  force = false,
 ): Promise<SlicePayload> {
   const cacheKey = `${range.since}:${range.until}:${dimension}`;
-  const cached = sliceCache.get(cacheKey);
-  if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
 
   const dashboard = await buildPayload(range);
   const creativeByAd = new Map<string, string>();
@@ -1237,10 +1418,15 @@ async function buildSlicePayload(
     >;
   };
   const segments = new Map<string, Acc>();
-  const rows = await fetchMetaDeliveryBreakdown(
-    range,
-    dimension,
-    [...creativeByAd.keys()],
+  const rows = await runUpstreamTask(
+    "meta",
+    `${dimension} slice ${range.since}:${range.until}`,
+    () =>
+      fetchMetaDeliveryBreakdown(
+        range,
+        dimension,
+        [...creativeByAd.keys()],
+      ),
   );
   for (const row of rows) {
     const creativeId = creativeByAd.get(row.adId);
@@ -1272,6 +1458,7 @@ async function buildSlicePayload(
   }
 
   const value: SlicePayload = {
+    generatedAt: new Date().toISOString(),
     dimension,
     range,
     segments: [...segments.values()]
@@ -1288,10 +1475,65 @@ async function buildSlicePayload(
       .sort((a, b) => b.totals.spend - a.totals.spend),
   };
   sliceCache.set(cacheKey, {
-    expiresAt: Date.now() + 10 * 60_000,
+    expiresAt: Date.now() + SLICE_CACHE_TTL_MS,
     value,
   });
+  try {
+    await writePayloadSnapshot(`slice-${dimension}`, range, value);
+  } catch (error) {
+    process.stderr.write(
+      `Dashboard ${dimension} snapshot failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
   return value;
+}
+
+async function refreshSlicePayload(
+  range: { since: string; until: string },
+  dimension: MetaBreakdownDimension,
+): Promise<SlicePayload> {
+  const key = `${range.since}:${range.until}:${dimension}`;
+  const pending = sliceInflight.get(key);
+  if (pending) return pending;
+  const promise = computeSlicePayload(range, dimension).finally(() =>
+    sliceInflight.delete(key),
+  );
+  sliceInflight.set(key, promise);
+  return promise;
+}
+
+async function buildSlicePayload(
+  range: { since: string; until: string },
+  dimension: MetaBreakdownDimension,
+  force = false,
+): Promise<SlicePayload> {
+  const cacheKey = `${range.since}:${range.until}:${dimension}`;
+  if (force) return refreshSlicePayload(range, dimension);
+  let cached = sliceCache.get(cacheKey);
+  if (!cached) {
+    const snapshot = await readPayloadSnapshot<SlicePayload>(
+      `slice-${dimension}`,
+      range,
+    );
+    if (snapshot) {
+      cached = {
+        expiresAt: snapshot.savedAt + SLICE_CACHE_TTL_MS,
+        value: snapshot.value,
+      };
+      sliceCache.set(cacheKey, cached);
+    }
+  }
+  if (cached) {
+    if (cached.expiresAt <= Date.now()) {
+      void refreshSlicePayload(range, dimension).catch((error: unknown) => {
+        process.stderr.write(
+          `Dashboard ${dimension} refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+    }
+    return cached.value;
+  }
+  return refreshSlicePayload(range, dimension);
 }
 
 async function buildDebriefVisualLearnings(
@@ -1630,6 +1872,14 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     return;
   }
 
+  if (url.pathname === "/api/upstream-health") {
+    json(res, 200, {
+      generatedAt: new Date().toISOString(),
+      lanes: upstreamTimingSnapshot(),
+    });
+    return;
+  }
+
   if (url.pathname === "/api/features/v1/creatives") {
     try {
       const range = resolveDebriefRange(
@@ -1805,7 +2055,11 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
       const value = {
         creative,
         rank: index + 1,
-        trend: await fetchMetaDailyTrend(range, creative.adIds),
+        trend: await runUpstreamTask(
+          "meta",
+          `creative trend ${creative.adIds.length} ads`,
+          () => fetchMetaDailyTrend(range, creative.adIds),
+        ),
       };
       detailCache.set(cacheKey, {
         expiresAt: Date.now() + 10 * 60_000,
@@ -1861,7 +2115,11 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
         json(res, 200, { adId, format, src: cached.src });
         return;
       }
-      const preview = await fetchMetaAdPreview(adId, format);
+      const preview = await runUpstreamTask(
+        "meta",
+        "ad preview",
+        () => fetchMetaAdPreview(adId, format),
+      );
       previewCache.set(cacheKey, {
         expiresAt: Date.now() + 30 * 60_000,
         src: preview.src,
@@ -2004,6 +2262,14 @@ async function prewarmDashboardWindows(): Promise<void> {
         await refreshPayload(range);
         if (days <= 28 && process.env.META_ACCESS_TOKEN?.trim()) {
           await refreshMediaPayload(range);
+          for (const dimension of [
+            "os",
+            "publisher",
+            "device",
+            "demographic",
+          ] as const) {
+            await refreshSlicePayload(range, dimension);
+          }
         }
       } catch (error) {
         process.stderr.write(
