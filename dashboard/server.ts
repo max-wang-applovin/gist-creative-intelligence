@@ -19,6 +19,7 @@ import { defaultDateRange } from "../bot/lib/dates.js";
 import {
   fetchMetaDeliveryBreakdown,
   fetchMetaDailyTrend,
+  fetchMetaDailyTrends,
   type MetaBreakdownDimension,
 } from "../bot/lib/meta-breakdowns.js";
 import {
@@ -266,6 +267,7 @@ type CacheEntry = { expiresAt: number; value: DashboardPayload };
 const DASHBOARD_CACHE_TTL_MS = 15 * 60_000;
 const MEDIA_CACHE_TTL_MS = 10 * 60_000;
 const SLICE_CACHE_TTL_MS = 30 * 60_000;
+const FATIGUE_CACHE_TTL_MS = 30 * 60_000;
 const SNAPSHOTS_PER_KIND = 24;
 const dashboardSnapshotDirectory = join(dataDirectory, "dashboard-cache");
 const dataCache = new Map<string, CacheEntry>();
@@ -289,6 +291,11 @@ const videoCache = new Map<
   string,
   { expiresAt: number; value: VideoMetricsPayload }
 >();
+const fatigueCache = new Map<
+  string,
+  { expiresAt: number; value: FatiguePayload }
+>();
+const fatigueInflight = new Map<string, Promise<FatiguePayload>>();
 const AD_MEDIA_CACHE_TTL_MS = 6 * 60 * 60_000;
 const ADMANAGE_ENRICHMENT_TTL_MS = 60 * 60_000;
 const AD_MEDIA_CACHE_LIMIT = 5_000;
@@ -307,6 +314,7 @@ let adManageLastFetchAt = 0;
 type PayloadSnapshotKind =
   | "metrics"
   | "media"
+  | "fatigue"
   | `slice-${MetaBreakdownDimension}`;
 
 type PayloadSnapshot<T> = {
@@ -497,6 +505,40 @@ type VideoMetricsPayload = {
   range: { since: string; until: string };
   totals: CreativeVideoMetrics;
   creatives: Record<string, CreativeVideoMetrics>;
+};
+
+type FatigueMetrics = {
+  spend: number;
+  impressions: number;
+  clicks: number;
+  ctr: number;
+  cpm: number;
+};
+
+type FatiguePayload = {
+  generatedAt: string;
+  range: { since: string; until: string };
+  comparisonDays: number;
+  summary: {
+    fatiguing: number;
+    watch: number;
+    stable: number;
+    insufficient: number;
+  };
+  creatives: Array<{
+    creativeId: string;
+    creativeName: string;
+    status: "Fatiguing" | "Watch" | "Stable" | "Insufficient";
+    score: number;
+    reasons: string[];
+    previous: FatigueMetrics;
+    recent: FatigueMetrics;
+    changes: {
+      spend: number | null;
+      ctr: number | null;
+      cpm: number | null;
+    };
+  }>;
 };
 
 function json(res: ServerResponse, status: number, value: unknown): void {
@@ -1333,6 +1375,224 @@ async function buildVideoMetricsPayload(
     value,
   });
   return value;
+}
+
+function fatigueMetrics(
+  points: Array<{
+    spend: number;
+    impressions: number;
+    clicks: number;
+  }>,
+): FatigueMetrics {
+  const spend = points.reduce((sum, point) => sum + point.spend, 0);
+  const impressions = points.reduce(
+    (sum, point) => sum + point.impressions,
+    0,
+  );
+  const clicks = points.reduce((sum, point) => sum + point.clicks, 0);
+  const round2 = (value: number) => Math.round(value * 100) / 100;
+  return {
+    spend: round2(spend),
+    impressions,
+    clicks,
+    ctr: round2(impressions > 0 ? (clicks / impressions) * 100 : 0),
+    cpm: round2(impressions > 0 ? (spend / impressions) * 1_000 : 0),
+  };
+}
+
+function percentageChange(
+  value: number,
+  previous: number,
+): number | null {
+  return previous > 0
+    ? Math.round(((value - previous) / previous) * 10_000) / 100
+    : null;
+}
+
+async function refreshFatiguePayload(range: {
+  since: string;
+  until: string;
+}): Promise<FatiguePayload> {
+  const key = `${range.since}:${range.until}`;
+  const pending = fatigueInflight.get(key);
+  if (pending) return pending;
+  const promise = (async () => {
+    const dashboard = await buildPayload(range);
+    const candidates: DashboardPayload["creatives"] = [];
+    let candidateAds = 0;
+    for (const creative of dashboard.creatives) {
+      if (creative.metaSpend < 100 || creative.adIds.length === 0) continue;
+      const uniqueAds = new Set(creative.adIds).size;
+      if (candidateAds + uniqueAds > 600) continue;
+      candidates.push(creative);
+      candidateAds += uniqueAds;
+      if (candidates.length >= 300) break;
+    }
+    const byAd = await runUpstreamTask(
+      "meta",
+      `fatigue trends ${range.since}:${range.until}`,
+      () =>
+        fetchMetaDailyTrends(
+          range,
+          candidates.flatMap((creative) => creative.adIds),
+        ),
+    );
+    const completeUntil =
+      range.until > defaultDateRange(1).until
+        ? defaultDateRange(1).until
+        : range.until;
+    const rangeDays =
+      Math.floor(
+        (Date.parse(`${completeUntil}T00:00:00Z`) -
+          Date.parse(`${range.since}T00:00:00Z`)) /
+          86_400_000,
+      ) + 1;
+    const comparisonDays = Math.max(1, Math.min(7, Math.floor(rangeDays / 2)));
+    const recentSince = new Date(`${completeUntil}T00:00:00Z`);
+    recentSince.setUTCDate(recentSince.getUTCDate() - (comparisonDays - 1));
+    const previousUntil = new Date(recentSince);
+    previousUntil.setUTCDate(previousUntil.getUTCDate() - 1);
+    const previousSince = new Date(previousUntil);
+    previousSince.setUTCDate(
+      previousSince.getUTCDate() - (comparisonDays - 1),
+    );
+    const recentSinceDay = recentSince.toISOString().slice(0, 10);
+    const previousSinceDay = previousSince.toISOString().slice(0, 10);
+    const previousUntilDay = previousUntil.toISOString().slice(0, 10);
+    const creatives = candidates.map((creative) => {
+      const points = creative.adIds.flatMap((adId) => byAd[adId] ?? []);
+      const previous = fatigueMetrics(
+        points.filter(
+          (point) =>
+            point.date >= previousSinceDay &&
+            point.date <= previousUntilDay,
+        ),
+      );
+      const recent = fatigueMetrics(
+        points.filter(
+          (point) =>
+            point.date >= recentSinceDay &&
+            point.date <= completeUntil,
+        ),
+      );
+      const changes = {
+        spend: percentageChange(recent.spend, previous.spend),
+        ctr: percentageChange(recent.ctr, previous.ctr),
+        cpm: percentageChange(recent.cpm, previous.cpm),
+      };
+      const enoughData =
+        rangeDays >= 6 &&
+        previous.impressions >= 1_000 &&
+        recent.impressions >= 500 &&
+        previous.spend >= 100;
+      const reasons: string[] = [];
+      let score = 0;
+      if (enoughData && changes.ctr !== null && changes.ctr <= -20) {
+        score += 2;
+        reasons.push(`CTR down ${Math.abs(changes.ctr).toFixed(0)}%`);
+      }
+      if (enoughData && changes.cpm !== null && changes.cpm >= 20) {
+        score += 1;
+        reasons.push(`CPM up ${changes.cpm.toFixed(0)}%`);
+      }
+      if (enoughData && changes.spend !== null && changes.spend <= -30) {
+        score += 1;
+        reasons.push(`Spend down ${Math.abs(changes.spend).toFixed(0)}%`);
+      }
+      const status = !enoughData
+        ? ("Insufficient" as const)
+        : score >= 2
+          ? ("Fatiguing" as const)
+          : score === 1
+            ? ("Watch" as const)
+            : ("Stable" as const);
+      if (status === "Stable") reasons.push("No material delivery decay");
+      if (status === "Insufficient") reasons.push("Needs more recent delivery");
+      return {
+        creativeId: creative.creativeId,
+        creativeName: creative.creativeName,
+        status,
+        score,
+        reasons,
+        previous,
+        recent,
+        changes,
+      };
+    });
+    const priority = {
+      Fatiguing: 0,
+      Watch: 1,
+      Stable: 2,
+      Insufficient: 3,
+    };
+    creatives.sort(
+      (a, b) =>
+        priority[a.status] - priority[b.status] ||
+        b.score - a.score ||
+        b.recent.spend - a.recent.spend,
+    );
+    const count = (status: (typeof creatives)[number]["status"]) =>
+      creatives.filter((creative) => creative.status === status).length;
+    const value: FatiguePayload = {
+      generatedAt: new Date().toISOString(),
+      range,
+      comparisonDays,
+      summary: {
+        fatiguing: count("Fatiguing"),
+        watch: count("Watch"),
+        stable: count("Stable"),
+        insufficient: count("Insufficient"),
+      },
+      creatives,
+    };
+    fatigueCache.set(key, {
+      expiresAt: Date.now() + FATIGUE_CACHE_TTL_MS,
+      value,
+    });
+    try {
+      await writePayloadSnapshot("fatigue", range, value);
+    } catch (error) {
+      process.stderr.write(
+        `Fatigue snapshot failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+    return value;
+  })().finally(() => fatigueInflight.delete(key));
+  fatigueInflight.set(key, promise);
+  return promise;
+}
+
+async function buildFatiguePayload(
+  range: { since: string; until: string },
+  force = false,
+): Promise<FatiguePayload> {
+  const key = `${range.since}:${range.until}`;
+  if (force) return refreshFatiguePayload(range);
+  let cached = fatigueCache.get(key);
+  if (!cached) {
+    const snapshot = await readPayloadSnapshot<FatiguePayload>(
+      "fatigue",
+      range,
+    );
+    if (snapshot) {
+      cached = {
+        expiresAt: snapshot.savedAt + FATIGUE_CACHE_TTL_MS,
+        value: snapshot.value,
+      };
+      fatigueCache.set(key, cached);
+    }
+  }
+  if (cached) {
+    if (cached.expiresAt <= Date.now()) {
+      void refreshFatiguePayload(range).catch((error: unknown) => {
+        process.stderr.write(
+          `Fatigue refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+    }
+    return cached.value;
+  }
+  return refreshFatiguePayload(range);
 }
 
 function deliveryMetrics(input: {
@@ -2265,6 +2525,25 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
         res,
         200,
         await buildVideoMetricsPayload(
+          range,
+          url.searchParams.get("refresh") === "1",
+        ),
+      );
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/fatigue") {
+    try {
+      const range = resolveRange(url);
+      json(
+        res,
+        200,
+        await buildFatiguePayload(
           range,
           url.searchParams.get("refresh") === "1",
         ),

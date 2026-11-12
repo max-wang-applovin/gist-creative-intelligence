@@ -17,6 +17,9 @@ const state = {
   page: "library",
   analysis: null,
   videoMetrics: null,
+  fatigue: null,
+  fatigueError: null,
+  fatigueRequest: 0,
   competitors: null,
   debrief: null,
   debriefComparison: null,
@@ -30,6 +33,7 @@ const state = {
   debriefPageNumber: 1,
   debriefTestedPageNumber: 1,
   expandedTestedGroups: new Set(),
+  expandedLineages: new Set(),
   scanJob: null,
   analysisReport: "overview",
   experiments: [],
@@ -1905,6 +1909,10 @@ async function loadData(force = false) {
   if (state.mediaPollTimer) clearTimeout(state.mediaPollTimer);
   state.mediaRequest += 1;
   state.mediaFreshness = null;
+  state.videoMetrics = null;
+  state.fatigue = null;
+  state.fatigueError = null;
+  state.fatigueRequest += 1;
   state.visibleCards = 60;
   loading.classList.remove("hidden");
   grid.innerHTML = "";
@@ -1944,6 +1952,7 @@ async function loadData(force = false) {
     if (state.page === "analysis") {
       void loadAnalysis();
       void loadVideoMetrics(params);
+      if (state.analysisReport === "fatigue") void loadFatigue(params);
     }
   } catch (error) {
     warning.textContent = error.message;
@@ -2589,6 +2598,68 @@ function renderRetentionReport(rows) {
   );
 }
 
+function fatigueChange(value, suffix = "%") {
+  if (value == null) return "—";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(1)}${suffix}`;
+}
+
+function renderFatigueReport() {
+  const fatigue = state.fatigue;
+  if (!fatigue) {
+    return (
+      reportHeader(
+        "Creative Fatigue",
+        state.fatigueError
+          ? "Fatigue analysis could not load."
+          : "Loading bounded daily Meta delivery trends…",
+      ) +
+      `<div class="analysis-empty">${escapeHtml(state.fatigueError || "Loading fatigue signals…")}</div>`
+    );
+  }
+  const actionable = fatigue.creatives.filter(
+    (item) => item.status === "Fatiguing" || item.status === "Watch",
+  );
+  const supporting = fatigue.creatives.filter(
+    (item) => item.status !== "Fatiguing" && item.status !== "Watch",
+  );
+  const rows = [
+    ...actionable,
+    ...supporting.slice(0, Math.max(0, 150 - actionable.length)),
+  ];
+  return (
+    reportHeader(
+      "Creative Fatigue",
+      `Compares the latest ${fatigue.comparisonDays} complete days with the prior ${fatigue.comparisonDays} for up to 300 creatives with $100+ spend. All actionable rows are shown; ${rows.length} of ${fatigue.creatives.length} total rows displayed.`,
+    ) +
+    `<div class="fatigue-summary">
+      <div><span>Fatiguing</span><strong>${integer(fatigue.summary.fatiguing)}</strong></div>
+      <div><span>Watch</span><strong>${integer(fatigue.summary.watch)}</strong></div>
+      <div><span>Stable</span><strong>${integer(fatigue.summary.stable)}</strong></div>
+      <div><span>Needs data</span><strong>${integer(fatigue.summary.insufficient)}</strong></div>
+    </div>
+    <div class="data-table-wrap"><table class="analysis-data-table fatigue-table">
+      <thead><tr><th class="sticky-cell">Creative</th><th>Status</th><th>Recent spend</th><th>Spend Δ</th><th>CTR prior</th><th>CTR recent</th><th>CTR Δ</th><th>CPM prior</th><th>CPM recent</th><th>CPM Δ</th><th>Signal</th></tr></thead>
+      <tbody>${rows
+        .map(
+          (item) => `<tr data-analysis-creative="${escapeHtml(item.creativeId)}">
+            <td class="sticky-cell">${escapeHtml(item.creativeName)}</td>
+            <td><span class="fatigue-status ${item.status.toLowerCase()}">${escapeHtml(item.status)}</span></td>
+            <td>${money(item.recent.spend)}</td>
+            <td>${fatigueChange(item.changes.spend)}</td>
+            <td>${pct(item.previous.ctr)}</td>
+            <td>${pct(item.recent.ctr)}</td>
+            <td>${fatigueChange(item.changes.ctr)}</td>
+            <td>${money(item.previous.cpm)}</td>
+            <td>${money(item.recent.cpm)}</td>
+            <td>${fatigueChange(item.changes.cpm)}</td>
+            <td>${escapeHtml(item.reasons.join(" · "))}</td>
+          </tr>`,
+        )
+        .join("")}</tbody>
+    </table></div>`
+  );
+}
+
 function renderLandingReport(rows) {
   const groups = new Map();
   for (const row of rows) {
@@ -2694,6 +2765,7 @@ function renderAnalysisReport() {
     clicks: () => renderClicksReport(rows),
     copy: () => renderCopyReport(rows, analyses),
     retention: () => renderRetentionReport(rows),
+    fatigue: () => renderFatigueReport(),
     landing: () => renderLandingReport(rows),
     data: () =>
       reportHeader(
@@ -2709,6 +2781,7 @@ function renderAnalysisReport() {
 function setAnalysisReport(report) {
   state.analysisReport = report;
   renderAnalysisReport();
+  if (report === "fatigue" && !state.fatigue) void loadFatigue();
 }
 
 function accountVideoPanel() {
@@ -2828,6 +2901,33 @@ async function loadVideoMetrics(params = currentRangeParams()) {
     if (state.detail?.tab === "performance") renderDetail();
   } catch (error) {
     console.warn(error.message);
+  }
+}
+
+async function loadFatigue(params = currentRangeParams()) {
+  const requestId = ++state.fatigueRequest;
+  const expectedRange = state.payload?.range;
+  state.fatigueError = null;
+  try {
+    const response = await fetch(`/api/fatigue?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Fatigue unavailable");
+    if (
+      requestId !== state.fatigueRequest ||
+      !expectedRange ||
+      expectedRange.since !== data.range.since ||
+      expectedRange.until !== data.range.until
+    ) {
+      return;
+    }
+    state.fatigue = data;
+    if (state.analysisReport === "fatigue") {
+      renderAnalysisReport();
+    }
+  } catch (error) {
+    if (requestId !== state.fatigueRequest) return;
+    state.fatigueError = error.message;
+    if (state.analysisReport === "fatigue") renderAnalysisReport();
   }
 }
 
@@ -3841,6 +3941,199 @@ function renderDebriefLearnings() {
     : '<div class="analysis-empty">No creatives were launched in this period.</div>';
 }
 
+function renderDebriefLineage() {
+  if (!state.debrief) return;
+  const { since, until } = state.debrief.range;
+  const groups = new Map();
+  for (const creative of state.debrief.all) {
+    if (
+      !creative.uploadedDate ||
+      creative.uploadedDate < since ||
+      creative.uploadedDate > until
+    ) {
+      continue;
+    }
+    const concept =
+      creative.testingAdSets?.[0] ||
+      creative.category ||
+      "Unassigned concept";
+    const rows = groups.get(concept) || [];
+    rows.push(creative);
+    groups.set(concept, rows);
+  }
+  const lineages = [...groups.entries()]
+    .filter(([, rows]) => rows.length >= 2)
+    .map(([concept, rows]) => {
+      const ordered = [...rows].sort((a, b) =>
+        (a.uploadedAt || "").localeCompare(b.uploadedAt || ""),
+      );
+      const first = ordered[0];
+      const latest = ordered.at(-1);
+      const best = [...rows].sort(
+        (a, b) =>
+          (a.retentionCostIndex ?? Infinity) -
+            (b.retentionCostIndex ?? Infinity) ||
+          (a.testing.cpsu ?? Infinity) - (b.testing.cpsu ?? Infinity),
+      )[0];
+      const change = (value, baseline) =>
+        value != null && baseline != null && baseline !== 0
+          ? ((value - baseline) / Math.abs(baseline)) * 100
+          : null;
+      return {
+        concept,
+        rows: ordered,
+        first,
+        latest,
+        best,
+        cpsuChange: change(latest.testing.cpsu, first.testing.cpsu),
+        d7Change:
+          latest.testing.d7 != null && first.testing.d7 != null
+            ? latest.testing.d7 - first.testing.d7
+            : null,
+        winners: rows.filter((row) => row.verdict === "Winner").length,
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.rows.length - a.rows.length ||
+        b.winners - a.winners ||
+        b.rows.reduce((sum, row) => sum + row.testing.spend, 0) -
+          a.rows.reduce((sum, row) => sum + row.testing.spend, 0),
+    );
+  $("debriefLineage").innerHTML = lineages.length
+    ? `<table class="analysis-data-table debrief-table lineage-table">
+      <thead><tr><th></th><th class="sticky-cell">Concept / ad group</th><th>Iterations</th><th>Winners</th><th>First</th><th>Latest</th><th>Best</th><th>Latest CPSU Δ</th><th>Latest D7 Δ</th></tr></thead>
+      <tbody>${lineages
+        .map((lineage) => {
+          const expanded = state.expandedLineages.has(lineage.concept);
+          const parent = `<tr class="lineage-row" data-lineage="${escapeHtml(lineage.concept)}">
+            <td><button class="concept-toggle">${expanded ? "▾" : "▸"}</button></td>
+            <td class="sticky-cell"><strong>${escapeHtml(lineage.concept)}</strong></td>
+            <td>${integer(lineage.rows.length)}</td>
+            <td>${integer(lineage.winners)}</td>
+            <td>${escapeHtml(lineage.first.readableName)}</td>
+            <td>${escapeHtml(lineage.latest.readableName)}</td>
+            <td>${escapeHtml(lineage.best.readableName)}</td>
+            <td class="${lineage.cpsuChange != null && lineage.cpsuChange < 0 ? "trend-positive" : lineage.cpsuChange > 0 ? "trend-negative" : ""}">${lineage.cpsuChange == null ? "—" : fatigueChange(lineage.cpsuChange)}</td>
+            <td class="${lineage.d7Change != null && lineage.d7Change > 0 ? "trend-positive" : lineage.d7Change < 0 ? "trend-negative" : ""}">${lineage.d7Change == null ? "—" : `${lineage.d7Change >= 0 ? "+" : ""}${lineage.d7Change.toFixed(1)} pts`}</td>
+          </tr>`;
+          const children = expanded
+            ? lineage.rows
+                .map(
+                  (row, index) => `<tr class="lineage-child">
+                    <td></td><td class="sticky-cell">${index + 1}. ${escapeHtml(row.readableName)}</td>
+                    <td>${debriefShortDay(row.uploadedDate)}</td>
+                    <td>${debriefVerdictChip(row)}</td>
+                    <td colspan="2">${money(row.testing.spend)} spend</td>
+                    <td>${debriefMoney(row.testing.cpsu)} CPSU</td>
+                    <td colspan="2">${debriefPct(row.testing.d7)} D7</td>
+                  </tr>`,
+                )
+                .join("")
+            : "";
+          return parent + children;
+        })
+        .join("")}</tbody></table>`
+    : '<div class="analysis-empty">No concepts have multiple launched iterations in this window.</div>';
+}
+
+function readinessForecast(row, day) {
+  const cohort = Number(row.testing?.[`d${day}Cohort`] || 0);
+  const rate = row.testing?.[`d${day}`];
+  const target = 50;
+  const status =
+    cohort >= target && rate != null
+      ? "Ready"
+      : cohort >= 20
+        ? "Low sample"
+        : "Collecting";
+  const matureDays = Math.max(
+    1,
+    Number(row.daysLive || 0) - day,
+  );
+  const matureCohortVelocity = cohort / matureDays;
+  const sampleDays =
+    cohort >= target
+      ? 0
+      : matureCohortVelocity > 0
+        ? Math.ceil((target - cohort) / matureCohortVelocity)
+        : null;
+  const calendarDate = row.uploadedDate
+    ? new Date(`${row.uploadedDate}T00:00:00Z`)
+    : null;
+  calendarDate?.setUTCDate(calendarDate.getUTCDate() + day + 1);
+  const sampleDate =
+    sampleDays == null
+      ? null
+      : new Date(Date.now() + sampleDays * 86_400_000);
+  const forecast =
+    status === "Ready"
+      ? null
+      : sampleDate
+        ? [calendarDate, sampleDate]
+          .filter(Boolean)
+          .sort((a, b) => b.getTime() - a.getTime())[0] || null
+        : null;
+  return { status, cohort, target, forecast };
+}
+
+function renderDebriefReadiness() {
+  if (!state.debrief) return;
+  const { since, until } = state.debrief.range;
+  const rows = state.debrief.all
+    .filter(
+      (row) =>
+        row.uploadedDate &&
+        row.uploadedDate >= since &&
+        row.uploadedDate <= until,
+    )
+    .map((row) => {
+      const d7 = readinessForecast(row, 7);
+      return {
+        row,
+        d1: readinessForecast(row, 1),
+        d3: readinessForecast(row, 3),
+        d7,
+        decisionReady: row.eligible && d7.status === "Ready",
+      };
+    })
+    .sort(
+      (a, b) =>
+        Number(b.decisionReady) - Number(a.decisionReady) ||
+        (a.d7.forecast?.getTime() ?? Infinity) -
+          (b.d7.forecast?.getTime() ?? Infinity) ||
+        b.row.testing.spend - a.row.testing.spend,
+    );
+  const ready = rows.filter((item) => item.decisionReady).length;
+  const d7Ready = rows.filter((item) => item.d7.status === "Ready").length;
+  const lowSample = rows.filter(
+    (item) => item.d7.status === "Low sample",
+  ).length;
+  $("debriefReadinessSummary").innerHTML = `
+    <div><span>D7 decision ready</span><strong>${integer(ready)}</strong></div>
+    <div><span>D7 ready</span><strong>${integer(d7Ready)}</strong></div>
+    <div><span>D7 low sample</span><strong>${integer(lowSample)}</strong></div>
+    <div><span>Still collecting</span><strong>${integer(rows.length - d7Ready - lowSample)}</strong></div>`;
+  const cell = (forecast) =>
+    `<td><span class="readiness-status ${forecast.status.toLowerCase().replace(" ", "-")}">${forecast.status}</span><small>${integer(forecast.cohort)}/${integer(forecast.target)} mature${forecast.forecast ? ` · est. ${debriefShortDay(forecast.forecast.toISOString().slice(0, 10))}` : ""}</small></td>`;
+  $("debriefReadiness").innerHTML = rows.length
+    ? `<table class="analysis-data-table debrief-table readiness-table">
+      <thead><tr><th class="sticky-cell">Creative</th><th>Verdict</th><th>Testing spend</th><th>Installs</th><th>D1 readiness</th><th>D3 readiness</th><th>D7 readiness</th><th>Decision</th></tr></thead>
+      <tbody>${rows
+        .map(
+          ({ row, d1, d3, d7, decisionReady }) => `<tr>
+            <td class="sticky-cell"><strong>${escapeHtml(row.readableName)}</strong><small>${escapeHtml(row.name)}</small></td>
+            <td>${debriefVerdictChip(row)}</td>
+            <td>${money(row.testing.spend)}</td>
+            <td>${integer(row.testing.installs)}</td>
+            ${cell(d1)}${cell(d3)}${cell(d7)}
+            <td><strong>${decisionReady ? "D7 ready" : "Waiting for D7"}</strong></td>
+          </tr>`,
+        )
+        .join("")}</tbody></table>`
+    : '<div class="analysis-empty">No launched creatives in this window.</div>';
+}
+
 function renderMatchingIssues() {
   const issues = state.debrief?.matchingIssues || [];
   const mappings = state.debrief?.creativeMappings || [];
@@ -3931,6 +4224,8 @@ function setDebriefSection(section) {
     });
   if (section === "decisions") renderDebriefTestedCreatives();
   else if (section === "learnings") renderDebriefLearnings();
+  else if (section === "lineage") renderDebriefLineage();
+  else if (section === "readiness") renderDebriefReadiness();
   else if (section === "all") renderDebriefAll();
   else if (section === "repair") renderMatchingIssues();
   else if (section === "experiments") void loadExperiments();
@@ -4105,6 +4400,7 @@ async function loadDebrief(force = false) {
     return;
   }
   state.debriefLoading = true;
+  state.expandedLineages.clear();
   $("debriefLoading").classList.remove("hidden");
   $("debriefWarning").classList.add("hidden");
   $("applyDebrief").disabled = true;
@@ -4166,6 +4462,9 @@ function switchPage(page) {
     if (state.payload) {
       void loadAnalysis();
       if (!state.videoMetrics) void loadVideoMetrics();
+      if (state.analysisReport === "fatigue" && !state.fatigue) {
+        void loadFatigue();
+      }
     } else {
       void loadData();
     }
@@ -4471,6 +4770,16 @@ $("debriefPage").addEventListener("click", (event) => {
     );
     return;
   }
+  const lineage = event.target.closest("[data-lineage]")?.dataset.lineage;
+  if (lineage) {
+    if (state.expandedLineages.has(lineage)) {
+      state.expandedLineages.delete(lineage);
+    } else {
+      state.expandedLineages.add(lineage);
+    }
+    renderDebriefLineage();
+    return;
+  }
   const testedConcept = event.target.closest("[data-tested-concept]")?.dataset
     .testedConcept;
   if (testedConcept) {
@@ -4585,6 +4894,7 @@ if (
     "clicks",
     "copy",
     "retention",
+    "fatigue",
     "landing",
     "data",
   ].includes(initialReport)

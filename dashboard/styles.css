@@ -243,6 +243,20 @@ select:focus, input:focus { border-color: var(--accent); }
 .report-heading { display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px; }
 .report-heading h3 { margin: 0; font-size: 18px; }
 .report-heading p { margin: 4px 0 0; color: #75808b; font-size: 10px; }
+.fatigue-summary { display: grid; grid-template-columns: repeat(4, minmax(100px,1fr)); gap: 8px; margin-bottom: 12px; }
+.fatigue-summary > div { padding: 10px; border: 1px solid #dfe4ea; border-radius: 8px; background: white; }
+.fatigue-summary span { display: block; color: #75808b; font-size: 8px; text-transform: uppercase; }
+.fatigue-summary strong { display: block; margin-top: 3px; font-size: 15px; }
+.fatigue-status, .readiness-status { display: inline-block; border-radius: 999px; padding: 3px 7px; font-size: 8px; font-weight: 800; }
+.fatigue-status.fatiguing { background: #fde8e6; color: #a23a31; }
+.fatigue-status.watch, .readiness-status.low-sample { background: #fdf1de; color: #9a5d0c; }
+.fatigue-status.stable, .readiness-status.ready { background: #e3f6ec; color: #18724f; }
+.fatigue-status.insufficient, .readiness-status.collecting { background: #f1f3f5; color: #64707b; }
+.trend-positive { color: #18724f; font-weight: 750; }
+.trend-negative { color: #b54a42; font-weight: 750; }
+.lineage-row { cursor: pointer; }
+.lineage-child td { background: #f7f9fb; }
+.readiness-table td > small { display: block; margin-top: 4px; color: #75808b; font-size: 8px; }
 .report-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
 .report-card { overflow: hidden; border: 1px solid #dfe4ea; border-radius: 10px; background: #fff; }
 .report-card-media { height: 160px; background: #eef1f4; }
@@ -600,6 +614,7 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .debrief-action-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .debrief-summary-bar { grid-template-columns: repeat(4, minmax(80px,1fr)); }
   .debrief-period-comparison { grid-template-columns: repeat(2, minmax(100px,1fr)); }
+  .fatigue-summary { grid-template-columns: repeat(2, minmax(100px,1fr)); }
   .debrief-learning-grid { grid-template-columns: 1fr; }
   .learning-cpsu-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .freshness { display: none; }
@@ -619,4 +634,5 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .debrief-summary-bar { grid-template-columns: repeat(2, minmax(80px,1fr)); }
   .debrief-inline-controls { align-items: stretch; flex-direction: column; }
   .learning-cpsu-summary { grid-template-columns: 1fr; }
+  .fatigue-summary { grid-template-columns: 1fr; }
 }

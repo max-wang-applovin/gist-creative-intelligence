@@ -27,6 +27,7 @@ export type MetaDailyPoint = {
 
 type GraphBreakdownRow = {
   ad_id?: string;
+  date_start?: string;
   spend?: string;
   impressions?: string;
   clicks?: string;
@@ -126,6 +127,11 @@ export async function fetchMetaDeliveryBreakdown(
       raw.push(...(payload.data ?? []));
       next = payload.paging?.next;
     }
+    if (next) {
+      throw new Error(
+        `Meta ${dimension} breakdown exceeded 50 pages for one ad batch.`,
+      );
+    }
   }
 
   return raw
@@ -149,69 +155,113 @@ export async function fetchMetaDeliveryBreakdown(
 }
 
 /** Fetch and aggregate daily Meta delivery for one creative's constituent ads. */
-export async function fetchMetaDailyTrend(
+export async function fetchMetaDailyTrends(
   range: DateRange,
   adIds: string[],
-): Promise<MetaDailyPoint[]> {
+): Promise<Record<string, MetaDailyPoint[]>> {
   const ids = [...new Set(adIds.filter((id) => /^\d+$/.test(id)))];
-  if (ids.length === 0) return [];
-
-  const url = new URL(
-    `https://graph.facebook.com/v21.0/${accountId()}/insights`,
-  );
-  url.searchParams.set("level", "ad");
-  url.searchParams.set(
-    "fields",
-    "ad_id,date_start,spend,impressions,clicks",
-  );
-  url.searchParams.set("time_increment", "1");
-  url.searchParams.set("time_range", JSON.stringify(range));
-  url.searchParams.set(
-    "filtering",
-    JSON.stringify([{ field: "ad.id", operator: "IN", value: ids }]),
-  );
-  url.searchParams.set("limit", "500");
-  url.searchParams.set("access_token", token());
-
-  const byDate = new Map<
+  if (ids.length === 0) return {};
+  const byAdDate = new Map<
     string,
     { spend: number; impressions: number; clicks: number }
   >();
-  let next: string | undefined = url.toString();
-  let pages = 0;
-  while (next && pages < 50) {
-    pages += 1;
-    const response = await fetch(next);
-    if (!response.ok) {
-      const body = await response.text();
+  for (const batch of chunks(ids, 200)) {
+    const url = new URL(
+      `https://graph.facebook.com/v21.0/${accountId()}/insights`,
+    );
+    url.searchParams.set("level", "ad");
+    url.searchParams.set(
+      "fields",
+      "ad_id,date_start,spend,impressions,clicks",
+    );
+    url.searchParams.set("time_increment", "1");
+    url.searchParams.set("time_range", JSON.stringify(range));
+    url.searchParams.set(
+      "filtering",
+      JSON.stringify([{ field: "ad.id", operator: "IN", value: batch }]),
+    );
+    url.searchParams.set("limit", "500");
+    url.searchParams.set("access_token", token());
+
+    let next: string | undefined = url.toString();
+    let pages = 0;
+    while (next && pages < 50) {
+      pages += 1;
+      const response = await fetch(next);
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(
+          `Meta daily trend ${response.status}: ${body.slice(0, 300)}`,
+        );
+      }
+      const payload = (await response.json()) as GraphPage;
+      for (const row of payload.data ?? []) {
+        const adId = row.ad_id;
+        const date = row.date_start;
+        if (!adId || !date) continue;
+        const key = `${adId}:${date}`;
+        const existing = byAdDate.get(key) ?? {
+          spend: 0,
+          impressions: 0,
+          clicks: 0,
+        };
+        existing.spend += num(row.spend);
+        existing.impressions += num(row.impressions);
+        existing.clicks += num(row.clicks);
+        byAdDate.set(key, existing);
+      }
+      next = payload.paging?.next;
+    }
+    if (next) {
       throw new Error(
-        `Meta daily trend ${response.status}: ${body.slice(0, 300)}`,
+        "Meta daily trend exceeded 50 pages for one ad batch.",
       );
     }
-    const payload = (await response.json()) as GraphPage;
-    for (const row of payload.data ?? []) {
-      const date = (row as GraphBreakdownRow & { date_start?: string })
-        .date_start;
-      if (!date) continue;
-      const existing = byDate.get(date) ?? {
-        spend: 0,
-        impressions: 0,
-        clicks: 0,
-      };
-      existing.spend += num(row.spend);
-      existing.impressions += num(row.impressions);
-      existing.clicks += num(row.clicks);
-      byDate.set(date, existing);
-    }
-    next = payload.paging?.next;
   }
 
-  return [...byDate.entries()]
-    .map(([date, metrics]) => ({
+  const result: Record<string, MetaDailyPoint[]> = {};
+  for (const [key, metrics] of byAdDate) {
+    const separator = key.indexOf(":");
+    const adId = key.slice(0, separator);
+    const date = key.slice(separator + 1);
+    (result[adId] ??= []).push({
       date,
       spend: Math.round(metrics.spend * 100) / 100,
       impressions: metrics.impressions,
       clicks: metrics.clicks,
+    });
+  }
+  for (const points of Object.values(result)) {
+    points.sort((a, b) => a.date.localeCompare(b.date));
+  }
+  return result;
+}
+
+export async function fetchMetaDailyTrend(
+  range: DateRange,
+  adIds: string[],
+): Promise<MetaDailyPoint[]> {
+  const byAd = await fetchMetaDailyTrends(range, adIds);
+  const byDate = new Map<
+    string,
+    { spend: number; impressions: number; clicks: number }
+  >();
+  for (const point of Object.values(byAd).flat()) {
+    const existing = byDate.get(point.date) ?? {
+      spend: 0,
+      impressions: 0,
+      clicks: 0,
+    };
+    existing.spend += point.spend;
+    existing.impressions += point.impressions;
+    existing.clicks += point.clicks;
+    byDate.set(point.date, existing);
+  }
+  return [...byDate.entries()]
+    .map(([date, metrics]) => ({
+      date,
+      ...metrics,
+      spend: Math.round(metrics.spend * 100) / 100,
     }))
     .sort((a, b) => a.date.localeCompare(b.date));
 }

@@ -183,6 +183,7 @@
             <button data-analysis-report="clicks">Top Clicks</button>
             <button data-analysis-report="copy">Top Copy</button>
             <button data-analysis-report="retention">Retention Leaders</button>
+            <button data-analysis-report="fatigue">Fatigue</button>
             <button data-analysis-report="landing">Landing Pages</button>
             <button data-analysis-report="data">Data Views</button>
           </nav>
@@ -285,6 +286,8 @@
               <nav class="debrief-section-nav" aria-label="Test debrief sections">
                 <button class="active" data-debrief-section="decisions">Tested creatives</button>
                 <button data-debrief-section="learnings">Learnings</button>
+                <button data-debrief-section="lineage">Lineage</button>
+                <button data-debrief-section="readiness">Retention readiness</button>
                 <button data-debrief-section="scaled">Scale candidates</button>
                 <button data-debrief-section="benchmarks">Benchmarks</button>
                 <button data-debrief-section="all">All data</button>
@@ -343,6 +346,17 @@
               </div>
               <p id="debriefVisualCoverage" class="debrief-rule"></p>
               <div id="debriefLearnings" class="data-table-wrap debrief-table-wrap"></div>
+            </section>
+            <section id="debriefSectionLineage" class="analysis-card debrief-card hidden" data-debrief-section-panel="lineage">
+              <div class="analysis-card-title">Creative lineage · concept iterations</div>
+              <p class="debrief-rule">Groups creatives by testing ad group or parsed concept and compares first, latest, and best iterations.</p>
+              <div id="debriefLineage" class="data-table-wrap debrief-table-wrap"></div>
+            </section>
+            <section id="debriefSectionReadiness" class="analysis-card debrief-card hidden" data-debrief-section-panel="readiness">
+              <div class="analysis-card-title">Retention readiness forecast</div>
+              <p class="debrief-rule">Heuristic forecast based on observed mature-cohort velocity. A standard decision is ready only after at least 50 mature D7 installs.</p>
+              <div id="debriefReadinessSummary" class="fatigue-summary"></div>
+              <div id="debriefReadiness" class="data-table-wrap debrief-table-wrap"></div>
             </section>
             <section id="debriefSectionScaled" class="analysis-card debrief-card hidden" data-debrief-section-panel="scaled">
               <div class="analysis-card-title">Scale candidates · ready to push</div>
