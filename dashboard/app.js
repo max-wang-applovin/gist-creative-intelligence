@@ -2284,11 +2284,11 @@ function renderDebriefTestedCreatives() {
             <td>${debriefPct(group.d7)}</td>
           </tr>`;
           const childRows = expanded
-            ? group.creatives
+            ? [...group.creatives]
                 .sort(
                   (a, b) =>
-                    (b.uploadedAt || "").localeCompare(a.uploadedAt || "") ||
-                    b.testing.spend - a.testing.spend,
+                    b.testing.spend - a.testing.spend ||
+                    (b.uploadedAt || "").localeCompare(a.uploadedAt || ""),
                 )
                 .map(
                   (row) => `<tr class="tested-creative-row">
@@ -2921,6 +2921,7 @@ function renderDebriefLearnings() {
             ? (winners / creatives.length) * 100
             : 0,
           testingSpend: spend,
+          signups,
           cpsu: signups > 0 ? spend / signups : null,
           d1: retention(1),
           d3: retention(3),
@@ -2963,18 +2964,91 @@ function renderDebriefLearnings() {
     "Concept",
     (row) => row.testingAdSets?.[0] || row.category,
   );
+  const cpsuBenchmark =
+    state.debrief.typical?.cpsu ??
+    state.debrief.benchmarks?.average?.cpsu ??
+    null;
+  const assessedConcepts = conceptRollups
+    .map((row) => {
+      const assessment =
+        row.testingSpend < 100
+          ? "Needs spend"
+          : row.signups === 0 || row.cpsu === null
+            ? "No sign-ups"
+            : cpsuBenchmark !== null && row.cpsu > cpsuBenchmark
+              ? "High CPSU"
+              : "Efficient";
+      return { ...row, assessment };
+    })
+    .sort((a, b) => {
+      const priority = {
+        "No sign-ups": 0,
+        "High CPSU": 1,
+        "Needs spend": 2,
+        Efficient: 3,
+      };
+      return (
+        priority[a.assessment] - priority[b.assessment] ||
+        b.testingSpend - a.testingSpend
+      );
+    });
+  const assessmentCounts = Object.fromEntries(
+    ["Efficient", "High CPSU", "No sign-ups", "Needs spend"].map(
+      (assessment) => [
+        assessment,
+        assessedConcepts.filter((row) => row.assessment === assessment).length,
+      ],
+    ),
+  );
+  const conceptLearningTable = `
+    <section class="debrief-learning-panel learning-table-panel">
+      <div class="learning-cpsu-heading">
+        <h3>Concept CPSU learnings</h3>
+        <span>$100+ evidence floor · ${debriefMoney(cpsuBenchmark)} testing CPSU benchmark</span>
+      </div>
+      <div class="learning-cpsu-summary">
+        ${["Efficient", "High CPSU", "No sign-ups", "Needs spend"]
+          .map(
+            (assessment) =>
+              `<div class="assessment-${assessment.toLowerCase().replaceAll(" ", "-")}"><span>${assessment}</span><strong>${integer(assessmentCounts[assessment])}</strong></div>`,
+          )
+          .join("")}
+      </div>
+      <div class="data-table-wrap retention-table-wrap">
+        <table class="analysis-data-table debrief-table">
+          <thead><tr><th class="sticky-cell">Concept</th><th>Assessment</th><th>Tested</th><th>Testing spend</th><th>Sign-ups</th><th>CPSU</th><th>vs benchmark</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
+          <tbody>${assessedConcepts
+            .slice(0, 25)
+            .map(
+              (row) => `<tr>
+                <td class="sticky-cell"><strong>${escapeHtml(row.value)}</strong></td>
+                <td><span class="learning-assessment assessment-${row.assessment.toLowerCase().replaceAll(" ", "-")}">${row.assessment}</span></td>
+                <td>${integer(row.tested)}</td>
+                <td>${money(row.testingSpend)}</td>
+                <td>${integer(row.signups)}</td>
+                <td>${debriefMoney(row.cpsu)}</td>
+                <td>${row.cpsu !== null && cpsuBenchmark ? `${((row.cpsu / cpsuBenchmark - 1) * 100).toFixed(0)}%` : "—"}</td>
+                <td>${debriefPct(row.d1)}</td>
+                <td>${debriefPct(row.d3)}</td>
+                <td>${debriefPct(row.d7)}</td>
+              </tr>`,
+            )
+            .join("")}</tbody>
+        </table>
+      </div>
+    </section>`;
   const comparisonRollups = [
     ...rollups("Source", (row) => row.source),
     ...rollups("Format", (row) => row.format),
     ...rollups("OS", (row) => row.os),
   ];
   $("debriefLearnings").innerHTML =
+    conceptLearningTable +
+    learningTable("Source · format · OS performance", comparisonRollups, 30) +
     patternPanel("Patterns among winners", visual.winningPatterns, "positive") +
     patternPanel("Patterns among losers", visual.losingPatterns, "negative") +
     notesPanel("Observed strengths", visual.strengths, "positive") +
-    notesPanel("Observed risks", visual.risks, "negative") +
-    learningTable("Concept performance", conceptRollups) +
-    learningTable("Source · format · OS performance", comparisonRollups, 30);
+    notesPanel("Observed risks", visual.risks, "negative");
 }
 
 function setDebriefSection(section) {

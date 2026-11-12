@@ -316,6 +316,16 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-learning-panel h3 { margin: 0 0 10px; font-size: 11px; text-transform: uppercase; }
 .debrief-learning-panel ul { margin: 0; padding-left: 17px; color: #4e5964; font-size: 10px; line-height: 1.55; }
 .debrief-learning-panel.learning-table-panel { grid-column: 1 / -1; background: white; }
+.learning-cpsu-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.learning-cpsu-heading > span { color: #75808b; font-size: 9px; }
+.learning-cpsu-summary { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 7px; margin-bottom: 10px; }
+.learning-cpsu-summary > div { display: flex; justify-content: space-between; padding: 8px 9px; border-radius: 7px; background: #f4f7fb; }
+.learning-cpsu-summary span { font-size: 8px; text-transform: uppercase; }
+.learning-cpsu-summary strong { font-size: 13px; }
+.learning-assessment { display: inline-block; border-radius: 999px; padding: 3px 7px; font-size: 8px; font-weight: 800; white-space: nowrap; }
+.assessment-efficient { background: #e3f6ec !important; color: #18724f; }
+.assessment-high-cpsu, .assessment-no-sign-ups { background: #fde8e8 !important; color: #a92d2d; }
+.assessment-needs-spend { background: #fdf1de !important; color: #9a5d0c; }
 .debrief-pattern-row { display: grid; grid-template-columns: 90px minmax(0,1fr); gap: 4px 8px; padding: 7px 0; border-top: 1px solid rgba(0,0,0,.06); }
 .debrief-pattern-row:first-of-type { border-top: 0; }
 .debrief-pattern-row > span { color: #75808b; font-size: 8px; text-transform: uppercase; }
@@ -335,6 +345,8 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-action-pill.action-iterate { background: #e5edfb; color: #185ecb; }
 .debrief-action-pill.action-wait { background: #fdf1de; color: #9a5d0c; }
 .debrief-decision-queue { max-height: 620px; }
+.debrief-tested-scroll { min-height: 360px; max-height: calc(100vh - 290px); overflow: auto; }
+.debrief-tested-scroll .analysis-data-table th { top: 0; }
 .decision-concept-row { background: #f4f7fb; cursor: pointer !important; }
 .decision-concept-row:hover td { background: #eaf0f8 !important; }
 .decision-concept-row .sticky-cell { background: #f4f7fb; }
@@ -511,6 +523,7 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .debrief-action-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .debrief-summary-bar { grid-template-columns: repeat(4, minmax(80px,1fr)); }
   .debrief-learning-grid { grid-template-columns: 1fr; }
+  .learning-cpsu-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .freshness { display: none; }
 }
 @media (max-width: 560px) {
@@ -522,4 +535,5 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .debrief-action-summary { grid-template-columns: 1fr; }
   .debrief-summary-bar { grid-template-columns: repeat(2, minmax(80px,1fr)); }
   .debrief-inline-controls { align-items: stretch; flex-direction: column; }
+  .learning-cpsu-summary { grid-template-columns: 1fr; }
 }
