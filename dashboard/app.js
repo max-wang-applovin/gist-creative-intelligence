@@ -25,6 +25,9 @@ const state = {
   expandedTestedGroups: new Set(),
   scanJob: null,
   analysisReport: "overview",
+  experiments: [],
+  savedReports: [],
+  testBriefs: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -433,6 +436,161 @@ function exportFilteredCsv() {
     `creative-intelligence-${state.payload?.range.since}-${state.payload?.range.until}.csv`;
   link.click();
   URL.revokeObjectURL(link.href);
+}
+
+function currentLibraryUrl() {
+  const params = currentRangeParams();
+  params.set("page", "library");
+  params.set("sort", $("sortMetric").value);
+  params.set("media", $("mediaType").value);
+  params.set("performance", $("performanceSlice").value);
+  params.set("minSpend", $("minimumSpend").value);
+  const search = $("searchInput").value.trim();
+  if (search) params.set("search", search);
+  if (state.activeSlice) {
+    const parameter = {
+      publisher: "audience",
+      demographic: "demographic",
+      device: "device",
+      os: "os",
+    }[state.activeSlice.dimension];
+    if (parameter) params.set(parameter, state.activeSlice.value);
+  }
+  return `/?${params.toString()}`;
+}
+
+async function saveCurrentView() {
+  const name = window.prompt("Name this report view:");
+  if (!name?.trim()) return;
+  const response = await fetch("/api/saved-reports", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name.trim(), url: currentLibraryUrl() }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Could not save view");
+  await loadWorkspace();
+}
+
+async function copySlackSummary() {
+  const rows = filteredRows().slice(0, 5);
+  const range = state.payload?.range;
+  const lines = [
+    `*Creative performance · ${range?.since} → ${range?.until}*`,
+    ...rows.map(
+      (row, index) =>
+        `${index + 1}. *${row.creativeName}* — ${money(row.metaSpend, true)} spend · ${money(row.cpi)} CPI · ${retentionPct(row.adjustRetentionD7, row.adjustRetentionDenD7)} D7`,
+    ),
+    `<${window.location.origin}${currentLibraryUrl()}|Open filtered dashboard>`,
+  ];
+  await navigator.clipboard.writeText(lines.join("\\n"));
+  $("copySlackSummaryButton").textContent = "Copied";
+  setTimeout(() => {
+    $("copySlackSummaryButton").textContent = "Copy Slack summary";
+  }, 1_500);
+}
+
+function renderWorkspace() {
+  $("savedReportsList").innerHTML =
+    state.savedReports
+      .map(
+        (report) => `<div class="workspace-item">
+          <a href="${escapeHtml(report.url)}">${escapeHtml(report.name)}</a>
+          <span>${new Date(report.createdAt).toLocaleString()}</span>
+          <button data-delete-report="${escapeHtml(report.id)}">Delete</button>
+        </div>`,
+      )
+      .join("") || '<div class="analysis-empty">No saved views yet.</div>';
+  $("testBriefsList").innerHTML =
+    state.testBriefs
+      .map(
+        (brief) => `<div class="workspace-item">
+          <div><strong>${escapeHtml(brief.title)}</strong><small>${escapeHtml(brief.sourceBrand)} · ${escapeHtml(brief.status)}</small><p>${escapeHtml(brief.hypothesis || "No hypothesis yet.")}</p></div>
+        </div>`,
+      )
+      .join("") || '<div class="analysis-empty">No competitor briefs yet.</div>';
+}
+
+async function loadWorkspace() {
+  const [reportsResponse, briefsResponse] = await Promise.all([
+    fetch("/api/saved-reports"),
+    fetch("/api/test-briefs"),
+  ]);
+  const reports = await reportsResponse.json();
+  const briefs = await briefsResponse.json();
+  state.savedReports = reports.reports || [];
+  state.testBriefs = briefs.briefs || [];
+  renderWorkspace();
+}
+
+function renderExperiments() {
+  const warningsFor = (experiment) =>
+    [
+      !experiment.control && "No fixed control",
+      !experiment.variants && "No variants defined",
+      !experiment.guardrails && "No guardrails",
+      !experiment.owner && "No owner",
+    ].filter(Boolean);
+  $("experimentList").innerHTML =
+    state.experiments.length > 0
+      ? `<table class="analysis-data-table debrief-table">
+          <thead><tr><th class="sticky-cell">Experiment</th><th>Status</th><th>Owner</th><th>Hypothesis</th><th>Primary metric</th><th>Guardrails</th><th>Confound checks</th><th>Updated</th><th></th></tr></thead>
+          <tbody>${state.experiments
+            .map((experiment) => {
+              const warnings = warningsFor(experiment);
+              return `<tr>
+                <td class="sticky-cell"><strong>${escapeHtml(experiment.name)}</strong></td>
+                <td>${escapeHtml(experiment.status)}</td>
+                <td>${escapeHtml(experiment.owner || "—")}</td>
+                <td class="debrief-reasons">${escapeHtml(experiment.hypothesis)}</td>
+                <td>${escapeHtml(experiment.primaryMetric)}</td>
+                <td>${escapeHtml(experiment.guardrails || "—")}</td>
+                <td>${warnings.length ? warnings.map((warning) => `<span class="experiment-warning">${escapeHtml(warning)}</span>`).join("") : '<span class="experiment-ready">Ready</span>'}</td>
+                <td>${new Date(experiment.updatedAt).toLocaleDateString()}</td>
+                <td><button data-edit-experiment="${escapeHtml(experiment.id)}">Edit</button><button data-delete-experiment="${escapeHtml(experiment.id)}">Delete</button></td>
+              </tr>`;
+            })
+            .join("")}</tbody>
+        </table>`
+      : '<div class="analysis-empty">No experiments registered yet.</div>';
+}
+
+async function loadExperiments() {
+  const response = await fetch("/api/experiments");
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Experiments unavailable");
+  state.experiments = data.experiments || [];
+  renderExperiments();
+}
+
+function clearExperimentForm() {
+  $("experimentForm").reset();
+  $("experimentId").value = "";
+}
+
+async function saveExperiment(event) {
+  event.preventDefault();
+  const payload = {
+    id: $("experimentId").value || undefined,
+    name: $("experimentName").value,
+    owner: $("experimentOwner").value,
+    status: $("experimentStatus").value,
+    hypothesis: $("experimentHypothesis").value,
+    control: $("experimentControl").value,
+    variants: $("experimentVariants").value,
+    primaryMetric: $("experimentPrimaryMetric").value,
+    guardrails: $("experimentGuardrails").value,
+    notes: $("experimentNotes").value,
+  };
+  const response = await fetch("/api/experiments", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Could not save experiment");
+  clearExperimentForm();
+  await loadExperiments();
 }
 
 function render() {
@@ -1514,12 +1672,43 @@ function renderCompetitors() {
               <h3>${escapeHtml(creative.pageName)}</h3>
               <p>${escapeHtml(creative.headline || creative.body || "No public copy")}</p>
               <div class="competitor-meta">${escapeHtml(creative.displayFormat)} · ${escapeHtml((creative.platforms || []).join(", "))}</div>
-              <a href="${escapeHtml(creative.libraryUrl)}" target="_blank" rel="noreferrer">Open in Meta Ad Library ↗</a>
+              <div class="competitor-actions"><a href="${escapeHtml(creative.libraryUrl)}" target="_blank" rel="noreferrer">Open in Meta Ad Library ↗</a><button data-create-brief="${index}">Create test brief</button></div>
             </div>
           </article>`;
       })
       .join("") ||
     '<div class="analysis-empty">No official active creatives with reported GB views for this brand.</div>';
+  $("inspirationQueries").querySelectorAll("[data-create-brief]").forEach(
+    (button) => {
+      button.addEventListener("click", () =>
+        void createCompetitorBrief(creatives[Number(button.dataset.createBrief)]),
+      );
+    },
+  );
+}
+
+async function createCompetitorBrief(creative) {
+  if (!creative) return;
+  const title = `${creative.brand} inspiration · ${creative.headline || creative.pageName}`;
+  const response = await fetch("/api/test-briefs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title,
+      sourceBrand: creative.brand,
+      sourceCreative: creative.libraryUrl,
+      hypothesis: `Adapt the ${creative.displayFormat || "creative"} pattern for a Gist value proposition.`,
+      valueProposition: "",
+      audience: "",
+      variants:
+        "1. Direct adaptation\\n2. New hook with same structure\\n3. Gist-native creator version",
+      status: "Draft",
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Could not create brief");
+  await loadWorkspace();
+  $("workspaceDialog").showModal();
 }
 
 async function loadCompetitors(force = false) {
@@ -3148,6 +3337,7 @@ function setDebriefSection(section) {
   if (section === "decisions") renderDebriefTestedCreatives();
   else if (section === "learnings") renderDebriefLearnings();
   else if (section === "all") renderDebriefAll();
+  else if (section === "experiments") void loadExperiments();
 }
 
 function renderDebrief() {
@@ -3394,6 +3584,12 @@ $("datePreset").addEventListener("change", () => {
 $("applyDates").addEventListener("click", () => void loadData());
 $("refreshButton").addEventListener("click", () => void loadData(true));
 $("exportCsvButton").addEventListener("click", exportFilteredCsv);
+$("saveViewButton").addEventListener("click", () =>
+  void saveCurrentView().catch((error) => window.alert(error.message)),
+);
+$("copySlackSummaryButton").addEventListener("click", () =>
+  void copySlackSummary().catch((error) => window.alert(error.message)),
+);
 $("compareNowButton").addEventListener("click", openComparison);
 $("clearCompareButton").addEventListener("click", () => {
   state.compareIds.clear();
@@ -3411,6 +3607,55 @@ $("closeMetricDictionary").addEventListener("click", () =>
 $("metricDictionaryDialog").addEventListener("click", (event) => {
   if (event.target === $("metricDictionaryDialog")) {
     $("metricDictionaryDialog").close();
+  }
+});
+$("workspaceButton").addEventListener("click", () => {
+  void loadWorkspace().then(() => $("workspaceDialog").showModal());
+});
+$("closeWorkspace").addEventListener("click", () =>
+  $("workspaceDialog").close(),
+);
+$("workspaceDialog").addEventListener("click", (event) => {
+  if (event.target === $("workspaceDialog")) {
+    $("workspaceDialog").close();
+    return;
+  }
+  const reportId = event.target.closest("[data-delete-report]")?.dataset
+    .deleteReport;
+  if (reportId) {
+    void fetch(`/api/saved-reports?id=${encodeURIComponent(reportId)}`, {
+      method: "DELETE",
+    }).then(loadWorkspace);
+  }
+});
+$("experimentForm").addEventListener("submit", (event) =>
+  void saveExperiment(event).catch((error) => window.alert(error.message)),
+);
+$("clearExperimentForm").addEventListener("click", clearExperimentForm);
+$("experimentList").addEventListener("click", (event) => {
+  const editId = event.target.closest("[data-edit-experiment]")?.dataset
+    .editExperiment;
+  if (editId) {
+    const experiment = state.experiments.find((item) => item.id === editId);
+    if (!experiment) return;
+    $("experimentId").value = experiment.id;
+    $("experimentName").value = experiment.name;
+    $("experimentOwner").value = experiment.owner;
+    $("experimentStatus").value = experiment.status;
+    $("experimentHypothesis").value = experiment.hypothesis;
+    $("experimentControl").value = experiment.control;
+    $("experimentVariants").value = experiment.variants;
+    $("experimentPrimaryMetric").value = experiment.primaryMetric;
+    $("experimentGuardrails").value = experiment.guardrails;
+    $("experimentNotes").value = experiment.notes;
+    return;
+  }
+  const deleteId = event.target.closest("[data-delete-experiment]")?.dataset
+    .deleteExperiment;
+  if (deleteId) {
+    void fetch(`/api/experiments?id=${encodeURIComponent(deleteId)}`, {
+      method: "DELETE",
+    }).then(loadExperiments);
   }
 });
 $("closeDialog").addEventListener("click", () => dialog.close());
@@ -3528,9 +3773,10 @@ $("debriefNextPage").addEventListener("click", () => {
   renderDebriefAll();
 });
 
-const initialPage = new URLSearchParams(window.location.search).get("page");
-const initialReport = new URLSearchParams(window.location.search).get("report");
-const initialDays = new URLSearchParams(window.location.search).get("days");
+const initialQuery = new URLSearchParams(window.location.search);
+const initialPage = initialQuery.get("page");
+const initialReport = initialQuery.get("report");
+const initialDays = initialQuery.get("days");
 applyDebriefWindowPreset();
 if (
   initialDays &&
@@ -3538,6 +3784,25 @@ if (
 ) {
   $("datePreset").value = initialDays;
 }
+if (initialQuery.get("since") && initialQuery.get("until")) {
+  $("datePreset").value = "custom";
+  $("sinceDate").value = initialQuery.get("since");
+  $("untilDate").value = initialQuery.get("until");
+  $("customDates").classList.remove("hidden");
+}
+for (const [parameter, id] of [
+  ["sort", "sortMetric"],
+  ["media", "mediaType"],
+  ["performance", "performanceSlice"],
+  ["minSpend", "minimumSpend"],
+]) {
+  const value = initialQuery.get(parameter);
+  const select = $(id);
+  if (value && [...select.options].some((option) => option.value === value)) {
+    select.value = value;
+  }
+}
+$("searchInput").value = initialQuery.get("search") || "";
 if (
   [
     "overview",

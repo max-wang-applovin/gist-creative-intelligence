@@ -27,6 +27,7 @@
           </div>
           <div class="topbar-actions">
             <span id="freshness" class="freshness">Loading live data…</span>
+            <button id="workspaceButton" class="button">Workspace</button>
             <button id="metricDictionaryButton" class="button" title="Metric definitions">Definitions</button>
             <button id="refreshButton" class="icon-button" title="Refresh">↻</button>
           </div>
@@ -130,6 +131,8 @@
               </select>
             </label>
             <div class="group-chip"><span>Group by</span> Adjust creative</div>
+            <button id="saveViewButton" class="button">Save view</button>
+            <button id="copySlackSummaryButton" class="button">Copy Slack summary</button>
             <button id="exportCsvButton" class="button">Export CSV</button>
             <div id="resultCount" class="result-count">— results</div>
           </div>
@@ -281,6 +284,7 @@
                 <button data-debrief-section="scaled">Scale candidates</button>
                 <button data-debrief-section="benchmarks">Benchmarks</button>
                 <button data-debrief-section="all">All data</button>
+                <button data-debrief-section="experiments">Experiments</button>
               </nav>
             </div>
             <section id="debriefSectionDecisions" class="analysis-card debrief-card" data-debrief-section-panel="decisions">
@@ -423,6 +427,24 @@
                 <ul id="debriefRules"></ul>
               </details>
             </section>
+            <section id="debriefSectionExperiments" class="analysis-card debrief-card hidden" data-debrief-section-panel="experiments">
+              <div class="analysis-card-title">Experiment registry</div>
+              <p class="debrief-rule">Capture the hypothesis and fixed test design before interpreting results.</p>
+              <form id="experimentForm" class="experiment-form">
+                <input id="experimentId" type="hidden" />
+                <label><span>Name</span><input id="experimentName" required /></label>
+                <label><span>Owner</span><input id="experimentOwner" /></label>
+                <label><span>Status</span><select id="experimentStatus"><option>Planned</option><option>Running</option><option>Decided</option></select></label>
+                <label class="wide"><span>Hypothesis</span><textarea id="experimentHypothesis" required></textarea></label>
+                <label><span>Control</span><textarea id="experimentControl"></textarea></label>
+                <label><span>Variants</span><textarea id="experimentVariants"></textarea></label>
+                <label><span>Primary metric</span><input id="experimentPrimaryMetric" required placeholder="e.g. D7 retained-user cost" /></label>
+                <label><span>Guardrails</span><input id="experimentGuardrails" placeholder="e.g. CPSU, D1, sample size" /></label>
+                <label class="wide"><span>Notes</span><textarea id="experimentNotes"></textarea></label>
+                <div class="wide experiment-actions"><button class="analysis-primary" type="submit">Save experiment</button><button id="clearExperimentForm" class="analysis-secondary" type="button">Clear</button></div>
+              </form>
+              <div id="experimentList" class="data-table-wrap debrief-table-wrap"></div>
+            </section>
           </div>
         </section>
       </main>
@@ -437,6 +459,14 @@
       <div class="metric-dialog-content">
         <header><p class="eyebrow">DATA DEFINITIONS</p><h2>Metric dictionary and lineage</h2></header>
         <div id="metricDictionary"></div>
+      </div>
+    </dialog>
+    <dialog id="workspaceDialog" class="metric-dialog">
+      <button id="closeWorkspace" class="dialog-close" aria-label="Close">×</button>
+      <div class="metric-dialog-content">
+        <header><p class="eyebrow">CREATIVE WORKSPACE</p><h2>Saved views and test briefs</h2></header>
+        <section><h3>Saved report views</h3><div id="savedReportsList"></div></section>
+        <section><h3>Competitor test briefs</h3><div id="testBriefsList"></div></section>
       </div>
     </dialog>
 

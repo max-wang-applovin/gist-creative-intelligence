@@ -37,6 +37,7 @@ import {
   refreshDebriefPayload,
   resolveDebriefRange,
 } from "./debrief.js";
+import { WorkspaceStore } from "./workspace.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "..");
@@ -104,6 +105,9 @@ const scanConfig = {
 let nextScheduledScanAt: string | null = null;
 const analysisStore = new CreativeAnalysisStore(
   join(dataDirectory, "creative-analysis.json"),
+);
+const workspaceStore = new WorkspaceStore(
+  join(dataDirectory, "creative-workspace.json"),
 );
 
 type ScanJob = {
@@ -1094,6 +1098,134 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     return;
   }
 
+  if (url.pathname === "/api/experiments") {
+    try {
+      if (req.method === "GET") {
+        json(res, 200, { experiments: await workspaceStore.listExperiments() });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (req.method === "DELETE") {
+        const id = url.searchParams.get("id") ?? "";
+        json(res, (await workspaceStore.deleteExperiment(id)) ? 200 : 404, {
+          deleted: id,
+        });
+        return;
+      }
+      if (req.method !== "POST") {
+        json(res, 405, { error: "Method not allowed" });
+        return;
+      }
+      const required = (key: string): string => {
+        const value = String(body[key] ?? "").trim();
+        if (!value) throw new Error(`${key} is required.`);
+        return value.slice(0, 2_000);
+      };
+      const status = String(body.status ?? "Planned");
+      if (!["Planned", "Running", "Decided"].includes(status)) {
+        throw new Error("status must be Planned, Running, or Decided.");
+      }
+      json(res, 200, {
+        experiment: await workspaceStore.upsertExperiment({
+          id: body.id ? String(body.id) : undefined,
+          name: required("name"),
+          hypothesis: required("hypothesis"),
+          control: String(body.control ?? "").trim().slice(0, 2_000),
+          variants: String(body.variants ?? "").trim().slice(0, 2_000),
+          owner: String(body.owner ?? "").trim().slice(0, 200),
+          primaryMetric: required("primaryMetric"),
+          guardrails: String(body.guardrails ?? "").trim().slice(0, 2_000),
+          status: status as "Planned" | "Running" | "Decided",
+          notes: String(body.notes ?? "").trim().slice(0, 5_000),
+        }),
+      });
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/saved-reports") {
+    try {
+      if (req.method === "GET") {
+        json(res, 200, { reports: await workspaceStore.listSavedReports() });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (req.method === "DELETE") {
+        const id = url.searchParams.get("id") ?? "";
+        json(res, (await workspaceStore.deleteSavedReport(id)) ? 200 : 404, {
+          deleted: id,
+        });
+        return;
+      }
+      if (req.method !== "POST") {
+        json(res, 405, { error: "Method not allowed" });
+        return;
+      }
+      const name = String(body.name ?? "").trim();
+      const reportUrl = String(body.url ?? "").trim();
+      if (!name || !reportUrl.startsWith("/")) {
+        throw new Error("name and a same-origin report URL are required.");
+      }
+      json(res, 200, {
+        report: await workspaceStore.saveReport(
+          name.slice(0, 200),
+          reportUrl.slice(0, 2_000),
+        ),
+      });
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/test-briefs") {
+    try {
+      if (req.method === "GET") {
+        json(res, 200, { briefs: await workspaceStore.listTestBriefs() });
+        return;
+      }
+      if (req.method !== "POST") {
+        json(res, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const title = String(body.title ?? "").trim();
+      if (!title) throw new Error("title is required.");
+      const status = String(body.status ?? "Draft");
+      if (!["Draft", "Ready", "Launched"].includes(status)) {
+        throw new Error("status must be Draft, Ready, or Launched.");
+      }
+      json(res, 200, {
+        brief: await workspaceStore.upsertTestBrief({
+          id: body.id ? String(body.id) : undefined,
+          title: title.slice(0, 300),
+          sourceBrand: String(body.sourceBrand ?? "").trim().slice(0, 200),
+          sourceCreative: String(body.sourceCreative ?? "")
+            .trim()
+            .slice(0, 2_000),
+          hypothesis: String(body.hypothesis ?? "").trim().slice(0, 2_000),
+          valueProposition: String(body.valueProposition ?? "")
+            .trim()
+            .slice(0, 2_000),
+          audience: String(body.audience ?? "").trim().slice(0, 1_000),
+          variants: String(body.variants ?? "").trim().slice(0, 3_000),
+          status: status as "Draft" | "Ready" | "Launched",
+        }),
+      });
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/analysis/scan") {
     try {
       const range = resolveRange(url);
@@ -1136,6 +1268,51 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   if (req.method !== "GET") {
     json(res, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  if (url.pathname === "/api/features/v1/creatives") {
+    try {
+      const range = resolveDebriefRange(
+        url.searchParams.get("since"),
+        url.searchParams.get("until"),
+      );
+      const debrief = await buildDebriefPayload(range);
+      json(res, 200, {
+        schemaVersion: 1,
+        generatedAt: debrief.generatedAt,
+        range: debrief.range,
+        lineage: {
+          delivery: "Adjust Report Service; Meta-partner creatives",
+          retention:
+            "retained_users_dN / installs from mature UTC calendar cohorts",
+          identity:
+            "cleaned Adjust creative label joined to Meta ad inventory",
+        },
+        features: debrief.all.map((creative) => ({
+          creativeId: normalizeCreativeName(creative.name),
+          creativeName: creative.name,
+          source: creative.source,
+          format: creative.format,
+          os: creative.os,
+          category: creative.category,
+          creator: creative.creator,
+          hook: creative.hook,
+          uploadedDate: creative.uploadedDate,
+          status: creative.status,
+          promoted: creative.promoted,
+          verdict: creative.verdict,
+          recommendedAction: creative.recommendedAction,
+          retentionConfidence: creative.retentionConfidence,
+          testing: creative.testing,
+          scaled: creative.scaled,
+        })),
+      });
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     return;
   }
 
