@@ -315,6 +315,7 @@ select:focus, input:focus { border-color: var(--accent); }
 .debrief-learning-panel.negative { border-color: #f1d4d4; background: #fff7f7; }
 .debrief-learning-panel h3 { margin: 0 0 10px; font-size: 11px; text-transform: uppercase; }
 .debrief-learning-panel ul { margin: 0; padding-left: 17px; color: #4e5964; font-size: 10px; line-height: 1.55; }
+.debrief-learning-panel.learning-table-panel { grid-column: 1 / -1; background: white; }
 .debrief-pattern-row { display: grid; grid-template-columns: 90px minmax(0,1fr); gap: 4px 8px; padding: 7px 0; border-top: 1px solid rgba(0,0,0,.06); }
 .debrief-pattern-row:first-of-type { border-top: 0; }
 .debrief-pattern-row > span { color: #75808b; font-size: 8px; text-transform: uppercase; }
@@ -343,6 +344,13 @@ select:focus, input:focus { border-color: var(--accent); }
 .decision-action-mix { min-width: 210px; text-align: left !important; }
 .decision-action-mix .debrief-action-pill { margin: 2px; }
 .concept-toggle { width: 26px; height: 26px; border: 1px solid #d7dde4; border-radius: 6px; padding: 0; background: white; color: #4d5864; }
+.tested-concept-row { background: #f4f7fb; cursor: pointer !important; }
+.tested-concept-row:hover td { background: #eaf0f8 !important; }
+.tested-concept-row .sticky-cell { background: #f4f7fb; }
+.tested-creative-row td { background: white; }
+.tested-creative-row .debrief-creative { padding-left: 20px; }
+.tested-verdict-mix { min-width: 190px; text-align: left !important; }
+.tested-verdict-mix .debrief-chip { margin: 2px; }
 .debrief-table-wrap { max-height: none; }
 .debrief-all { max-height: 720px; }
 .debrief-table { width: 100%; font-size: 11px; }

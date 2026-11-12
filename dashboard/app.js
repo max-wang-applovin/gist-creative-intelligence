@@ -21,6 +21,7 @@ const state = {
   debriefSection: "decisions",
   debriefPageNumber: 1,
   debriefTestedPageNumber: 1,
+  expandedTestedGroups: new Set(),
   scanJob: null,
   analysisReport: "overview",
 };
@@ -2162,79 +2163,155 @@ function renderDebriefTestedCreatives() {
   const sort = $("debriefTestedSort").value;
   const since = state.debrief.range.since;
   const until = state.debrief.range.until;
-  const numeric = (value, fallback) =>
-    value == null ? fallback : Number(value);
+  const rows = state.debrief.all.filter(
+    (row) =>
+      row.uploadedDate &&
+      row.uploadedDate >= since &&
+      row.uploadedDate <= until &&
+      (verdict === "all" || row.verdict === verdict),
+  );
+  const byConcept = new Map();
+  for (const row of rows) {
+    const concept =
+      row.testingAdSets?.[0] || row.category || "Unassigned concept";
+    const creatives = byConcept.get(concept) || [];
+    creatives.push(row);
+    byConcept.set(concept, creatives);
+  }
+  const groups = [...byConcept.entries()].map(([concept, creatives]) => {
+    const sum = (key) =>
+      creatives.reduce(
+        (total, row) => total + Number(row.testing?.[key] || 0),
+        0,
+      );
+    const retention = (day) => {
+      const cohort = sum(`d${day}Cohort`);
+      return cohort > 0 ? (sum(`retainedD${day}`) / cohort) * 100 : null;
+    };
+    const testingSpend = sum("spend");
+    const testingSignups = sum("signups");
+    const verdictCounts = Object.fromEntries(
+      ["Winner", "Loser", "Middle", "Learning"].map((outcome) => [
+        outcome,
+        creatives.filter((row) => row.verdict === outcome).length,
+      ]),
+    );
+    return {
+      concept,
+      creatives,
+      creativeCount: creatives.length,
+      latestUploaded: creatives.reduce(
+        (latest, row) =>
+          (row.uploadedAt || "") > latest ? row.uploadedAt : latest,
+        "",
+      ),
+      testingSpend,
+      testingSignups,
+      testingCpsu:
+        testingSignups > 0 ? testingSpend / testingSignups : null,
+      d1: retention(1),
+      d3: retention(3),
+      d7: retention(7),
+      verdictCounts,
+    };
+  });
+  const numeric = (value, fallback) => (value == null ? fallback : Number(value));
   const comparators = {
     newest: (a, b) =>
-      (b.uploadedAt ?? "").localeCompare(a.uploadedAt ?? "") ||
-      b.testing.spend - a.testing.spend,
-    spendDesc: (a, b) => b.testing.spend - a.testing.spend,
-    spendAsc: (a, b) => a.testing.spend - b.testing.spend,
-    signupsDesc: (a, b) => b.testing.signups - a.testing.signups,
-    signupsAsc: (a, b) => a.testing.signups - b.testing.signups,
+      b.latestUploaded.localeCompare(a.latestUploaded) ||
+      b.testingSpend - a.testingSpend,
+    spendDesc: (a, b) => b.testingSpend - a.testingSpend,
+    spendAsc: (a, b) => a.testingSpend - b.testingSpend,
+    signupsDesc: (a, b) => b.testingSignups - a.testingSignups,
+    signupsAsc: (a, b) => a.testingSignups - b.testingSignups,
     cpsuAsc: (a, b) =>
-      numeric(a.testing.cpsu, Infinity) -
-      numeric(b.testing.cpsu, Infinity),
+      numeric(a.testingCpsu, Infinity) -
+      numeric(b.testingCpsu, Infinity),
     cpsuDesc: (a, b) =>
-      numeric(b.testing.cpsu, -Infinity) -
-      numeric(a.testing.cpsu, -Infinity),
+      numeric(b.testingCpsu, -Infinity) -
+      numeric(a.testingCpsu, -Infinity),
     d1Desc: (a, b) =>
-      numeric(b.testing.d1, -Infinity) -
-      numeric(a.testing.d1, -Infinity),
+      numeric(b.d1, -Infinity) - numeric(a.d1, -Infinity),
     d3Desc: (a, b) =>
-      numeric(b.testing.d3, -Infinity) -
-      numeric(a.testing.d3, -Infinity),
+      numeric(b.d3, -Infinity) - numeric(a.d3, -Infinity),
     d7Desc: (a, b) =>
-      numeric(b.testing.d7, -Infinity) -
-      numeric(a.testing.d7, -Infinity),
+      numeric(b.d7, -Infinity) - numeric(a.d7, -Infinity),
   };
-  const rows = [...state.debrief.all]
-    .filter(
-      (row) =>
-        row.uploadedDate &&
-        row.uploadedDate >= since &&
-        row.uploadedDate <= until &&
-        (verdict === "all" || row.verdict === verdict),
-    )
-    .sort(comparators[sort] || comparators.newest);
+  groups.sort(comparators[sort] || comparators.newest);
   const pageSize = 25;
-  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(groups.length / pageSize));
   state.debriefTestedPageNumber = Math.min(
     Math.max(1, state.debriefTestedPageNumber),
     totalPages,
   );
   const start = (state.debriefTestedPageNumber - 1) * pageSize;
-  const pageRows = rows.slice(start, start + pageSize);
-  $("debriefTestedCount").textContent = rows.length
-    ? `${start + 1}–${Math.min(start + pageSize, rows.length)} of ${rows.length} launched`
+  const pageGroups = groups.slice(start, start + pageSize);
+  $("debriefTestedCount").textContent = groups.length
+    ? `${start + 1}–${Math.min(start + pageSize, groups.length)} of ${groups.length} concepts · ${rows.length} creatives`
     : "No launched creatives";
   $("debriefTestedPageStatus").textContent =
     `Page ${state.debriefTestedPageNumber} of ${totalPages}`;
   $("debriefTestedPreviousPage").disabled =
     state.debriefTestedPageNumber <= 1;
   $("debriefTestedNextPage").disabled =
-    state.debriefTestedPageNumber >= totalPages || rows.length === 0;
-  $("debriefTestedCreatives").innerHTML = pageRows.length
+    state.debriefTestedPageNumber >= totalPages || groups.length === 0;
+  const verdictMix = (group) =>
+    ["Winner", "Loser", "Middle", "Learning"]
+      .filter((outcome) => group.verdictCounts[outcome] > 0)
+      .map(
+        (outcome) =>
+          `<span class="debrief-chip verdict-${outcome.toLowerCase()}">${outcome} ${group.verdictCounts[outcome]}</span>`,
+      )
+      .join(" ");
+  $("debriefTestedCreatives").innerHTML = pageGroups.length
     ? `<table class="analysis-data-table debrief-table tested-creatives-table">
-      <thead><tr><th class="sticky-cell">Creative</th><th>Verdict</th><th>Launched</th><th>Concept / ad group</th><th>Source</th><th>Format</th><th>OS</th><th>Testing spend</th><th>Sign-ups</th><th>CPSU</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
-      <tbody>${pageRows
-        .map(
-          (row) => `<tr>
-            ${debriefCreativeCell(row)}
-            <td>${debriefVerdictChip(row)}</td>
-            <td>${debriefShortDay(row.uploadedDate)}</td>
-            <td>${escapeHtml(row.testingAdSets?.[0] || row.category || "—")}</td>
-            <td>${escapeHtml(row.source)}</td>
-            <td>${escapeHtml(row.format)}</td>
-            <td>${escapeHtml(row.os)}</td>
-            <td>${money(row.testing.spend)}</td>
-            <td>${integer(row.testing.signups)}</td>
-            <td>${debriefMoney(row.testing.cpsu)}</td>
-            <td>${debriefStageRetention(row, 1)}</td>
-            <td>${debriefStageRetention(row, 3)}</td>
-            <td>${debriefStageRetention(row, 7)}</td>
-          </tr>`,
-        )
+      <thead><tr><th></th><th class="sticky-cell">Concept / ad group</th><th>Creatives</th><th>Verdict mix</th><th>Latest launch</th><th>Source</th><th>Format</th><th>OS</th><th>Testing spend</th><th>Sign-ups</th><th>CPSU</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
+      <tbody>${pageGroups
+        .map((group) => {
+          const expanded = state.expandedTestedGroups.has(group.concept);
+          const groupRow = `<tr class="tested-concept-row" data-tested-concept="${escapeHtml(group.concept)}">
+            <td><button class="concept-toggle" aria-label="${expanded ? "Collapse" : "Expand"} ${escapeHtml(group.concept)}">${expanded ? "▾" : "▸"}</button></td>
+            <td class="sticky-cell"><strong>${escapeHtml(group.concept)}</strong></td>
+            <td>${integer(group.creativeCount)}</td>
+            <td class="tested-verdict-mix">${verdictMix(group)}</td>
+            <td>${debriefShortDay(group.latestUploaded?.slice(0, 10))}</td>
+            <td colspan="3">—</td>
+            <td>${money(group.testingSpend)}</td>
+            <td>${integer(group.testingSignups)}</td>
+            <td>${debriefMoney(group.testingCpsu)}</td>
+            <td>${debriefPct(group.d1)}</td>
+            <td>${debriefPct(group.d3)}</td>
+            <td>${debriefPct(group.d7)}</td>
+          </tr>`;
+          const childRows = expanded
+            ? group.creatives
+                .sort(
+                  (a, b) =>
+                    (b.uploadedAt || "").localeCompare(a.uploadedAt || "") ||
+                    b.testing.spend - a.testing.spend,
+                )
+                .map(
+                  (row) => `<tr class="tested-creative-row">
+                    <td></td>
+                    ${debriefCreativeCell(row)}
+                    <td></td>
+                    <td>${debriefVerdictChip(row)}</td>
+                    <td>${debriefShortDay(row.uploadedDate)}</td>
+                    <td>${escapeHtml(row.source)}</td>
+                    <td>${escapeHtml(row.format)}</td>
+                    <td>${escapeHtml(row.os)}</td>
+                    <td>${money(row.testing.spend)}</td>
+                    <td>${integer(row.testing.signups)}</td>
+                    <td>${debriefMoney(row.testing.cpsu)}</td>
+                    <td>${debriefStageRetention(row, 1)}</td>
+                    <td>${debriefStageRetention(row, 3)}</td>
+                    <td>${debriefStageRetention(row, 7)}</td>
+                  </tr>`,
+                )
+                .join("")
+            : "";
+          return groupRow + childRows;
+        })
         .join("")}</tbody>
     </table>`
     : '<div class="analysis-empty">No creatives were launched in this period with the selected verdict.</div>';
@@ -2803,11 +2880,101 @@ function renderDebriefLearnings() {
           : '<div class="analysis-empty">No repeated notes yet.</div>'
       }
     </section>`;
+  const launched = state.debrief.all.filter(
+    (row) =>
+      row.uploadedDate &&
+      row.uploadedDate >= state.debrief.range.since &&
+      row.uploadedDate <= state.debrief.range.until,
+  );
+  const rollups = (dimension, valueFor) => {
+    const groups = new Map();
+    for (const row of launched) {
+      const value = valueFor(row) || "Unknown";
+      const group = groups.get(value) || [];
+      group.push(row);
+      groups.set(value, group);
+    }
+    return [...groups.entries()]
+      .map(([value, creatives]) => {
+        const sum = (key) =>
+          creatives.reduce(
+            (total, row) => total + Number(row.testing?.[key] || 0),
+            0,
+          );
+        const retention = (day) => {
+          const cohort = sum(`d${day}Cohort`);
+          return cohort > 0
+            ? (sum(`retainedD${day}`) / cohort) * 100
+            : null;
+        };
+        const spend = sum("spend");
+        const signups = sum("signups");
+        const winners = creatives.filter(
+          (row) => row.verdict === "Winner",
+        ).length;
+        return {
+          dimension,
+          value,
+          tested: creatives.length,
+          winners,
+          winRate: creatives.length > 0
+            ? (winners / creatives.length) * 100
+            : 0,
+          testingSpend: spend,
+          cpsu: signups > 0 ? spend / signups : null,
+          d1: retention(1),
+          d3: retention(3),
+          d7: retention(7),
+        };
+      })
+      .sort(
+        (a, b) =>
+          b.testingSpend - a.testingSpend ||
+          b.tested - a.tested,
+      );
+  };
+  const learningTable = (title, rows, limit = 15) => `
+    <section class="debrief-learning-panel learning-table-panel">
+      <h3>${title}</h3>
+      <div class="data-table-wrap retention-table-wrap">
+        <table class="analysis-data-table debrief-table">
+          <thead><tr><th>Dimension</th><th class="sticky-cell">Value</th><th>Tested</th><th>Winners</th><th>Win rate</th><th>Testing spend</th><th>CPSU</th><th>D1</th><th>D3</th><th>D7</th></tr></thead>
+          <tbody>${rows
+            .slice(0, limit)
+            .map(
+              (row) => `<tr>
+                <td>${escapeHtml(row.dimension)}</td>
+                <td class="sticky-cell"><strong>${escapeHtml(row.value)}</strong></td>
+                <td>${integer(row.tested)}</td>
+                <td>${integer(row.winners)}</td>
+                <td>${pct(row.winRate)}</td>
+                <td>${money(row.testingSpend, true)}</td>
+                <td>${debriefMoney(row.cpsu)}</td>
+                <td>${debriefPct(row.d1)}</td>
+                <td>${debriefPct(row.d3)}</td>
+                <td>${debriefPct(row.d7)}</td>
+              </tr>`,
+            )
+            .join("")}</tbody>
+        </table>
+      </div>
+    </section>`;
+  const conceptRollups = rollups(
+    "Concept",
+    (row) => row.testingAdSets?.[0] || row.category,
+  );
+  const comparisonRollups = [
+    ...rollups("Source", (row) => row.source),
+    ...rollups("Format", (row) => row.format),
+    ...rollups("OS", (row) => row.os),
+  ];
   $("debriefLearnings").innerHTML =
     patternPanel("Patterns among winners", visual.winningPatterns, "positive") +
     patternPanel("Patterns among losers", visual.losingPatterns, "negative") +
     notesPanel("Observed strengths", visual.strengths, "positive") +
-    notesPanel("Observed risks", visual.risks, "negative");
+    notesPanel("Observed risks", visual.risks, "negative") +
+    learningTable("Concept performance", conceptRollups) +
+    learningTable("Source · format · OS performance", comparisonRollups, 30);
 }
 
 function setDebriefSection(section) {
@@ -3112,6 +3279,17 @@ $("debriefWindowPreset").addEventListener("change", () => {
   });
 });
 $("debriefPage").addEventListener("click", (event) => {
+  const testedConcept = event.target.closest("[data-tested-concept]")?.dataset
+    .testedConcept;
+  if (testedConcept) {
+    if (state.expandedTestedGroups.has(testedConcept)) {
+      state.expandedTestedGroups.delete(testedConcept);
+    } else {
+      state.expandedTestedGroups.add(testedConcept);
+    }
+    renderDebriefTestedCreatives();
+    return;
+  }
   const button = event.target.closest("[data-debrief-preview]");
   if (button) void openDebriefDetail(button);
 });
