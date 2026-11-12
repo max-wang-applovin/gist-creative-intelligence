@@ -1,4 +1,5 @@
 import type { DateRange } from "./types.js";
+import { activeMetaAdAccountId } from "./data-profile.js";
 
 type ActionValue = { action_type?: string; value?: string };
 
@@ -74,7 +75,7 @@ function firstActionValue(
 }
 
 function accountId(): string {
-  const raw = process.env.META_AD_ACCOUNT_ID?.trim();
+  const raw = activeMetaAdAccountId();
   if (!raw) throw new Error("META_AD_ACCOUNT_ID is required for video metrics.");
   return raw.startsWith("act_") ? raw : `act_${raw}`;
 }

@@ -3,6 +3,10 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { FIXTURE_ADJUST_ROWS } from "./fixtures.js";
 import { normalizeCreativeName } from "./names.js";
+import {
+  activeAdjustAppName,
+  activeAdjustAppToken,
+} from "./data-profile.js";
 import type { AdjustCreativeRow, DataSource, DateRange } from "./types.js";
 
 export type AdjustApp = {
@@ -142,8 +146,8 @@ function resolveApp(
   apps: AdjustApp[],
   opts: { appToken?: string; appName?: string },
 ): AdjustApp {
-  const envToken = process.env.ADJUST_APP_TOKEN?.trim();
-  const envName = process.env.ADJUST_APP_NAME?.trim();
+  const envToken = activeAdjustAppToken();
+  const envName = activeAdjustAppName();
   const wantToken = opts.appToken?.trim() || envToken;
   const wantName = opts.appName?.trim() || envName;
 
@@ -155,18 +159,23 @@ function resolveApp(
 
   if (wantName) {
     const lower = wantName.toLowerCase();
-    const hit = apps.find(
-      (app) =>
-        app.name.toLowerCase() === lower ||
-        app.name.toLowerCase().includes(lower),
+    const exact = apps.find((app) => app.name.toLowerCase() === lower);
+    if (exact) return exact;
+    const partial = apps.filter((app) =>
+      app.name.toLowerCase().includes(lower),
     );
-    if (!hit) {
+    if (partial.length === 1) return partial[0]!;
+    if (partial.length > 1) {
+      throw new Error(
+        `Multiple Adjust apps matched "${wantName}". Use an exact ADJUST_APP_NAME or ADJUST_APP_TOKEN: ${partial.map((app) => app.name).join(", ")}`,
+      );
+    }
+    if (partial.length === 0) {
       const names = apps.map((app) => app.name).join(", ") || "(none)";
       throw new Error(
         `No Adjust app matched "${wantName}". Available: ${names}`,
       );
     }
-    return hit;
   }
 
   if (apps.length === 0) {
@@ -610,8 +619,8 @@ export async function fetchAdjustCreativePerformance(
   if (missing.length > 0) {
     return {
       source: "fixture",
-      appToken: process.env.ADJUST_APP_TOKEN?.trim() || null,
-      appName: process.env.ADJUST_APP_NAME?.trim() || null,
+      appToken: activeAdjustAppToken(),
+      appName: activeAdjustAppName(),
       appsAvailable: [],
       partnerFilter: partnerMode,
       grouping: "adjust-creative-cleaned",

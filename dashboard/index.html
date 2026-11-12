@@ -26,6 +26,10 @@
             <h1>Creative Intelligence</h1>
           </div>
           <div class="topbar-actions">
+            <label id="profileControl" class="profile-control hidden">
+              <span>Account / app</span>
+              <select id="dataProfile"></select>
+            </label>
             <span id="freshness" class="freshness">Loading live data…</span>
             <button id="workspaceButton" class="button">Workspace</button>
             <button id="metricDictionaryButton" class="button" title="Metric definitions">Definitions</button>
@@ -207,6 +211,10 @@
           </nav>
           <div id="analysisOverview">
           <div id="analysisSummary" class="analysis-summary"></div>
+          <section class="analysis-card scan-priority-card">
+            <div class="analysis-card-title">Next visual scans · highest spend first</div>
+            <div id="scanPriority" class="data-table-wrap"></div>
+          </section>
           <div class="analysis-columns">
             <section class="analysis-card">
               <div class="analysis-card-title">What is working</div>
@@ -513,6 +521,24 @@
         <header><p class="eyebrow">CREATIVE WORKSPACE</p><h2>Saved views and test briefs</h2></header>
         <section><h3>Saved report views</h3><div id="savedReportsList"></div></section>
         <section><h3>Competitor test briefs</h3><div id="testBriefsList"></div></section>
+        <section class="workspace-targets">
+          <h3>Performance targets</h3>
+          <p>Global targets can be overridden by OS, source, or format. Segments are inferred from creative and campaign metadata; CPSU is evaluated in Test Debrief experiments, while CPI and the most mature available D1/D3/D7 target guide budget recommendations.</p>
+          <form id="targetForm" class="target-form">
+            <input id="targetId" type="hidden" />
+            <select id="targetDimension" aria-label="Target dimension"><option>Global</option><option>OS</option><option>Source</option><option>Format</option></select>
+            <input id="targetSegment" placeholder="All or segment name" value="All" />
+            <input id="targetCpi" type="number" min="0.01" step="0.01" placeholder="CPI target" />
+            <input id="targetCpsu" type="number" min="0.01" step="0.01" placeholder="CPSU target" />
+            <input id="targetD1" type="number" min="0.1" step="0.1" placeholder="D1 %" />
+            <input id="targetD3" type="number" min="0.1" step="0.1" placeholder="D3 %" />
+            <input id="targetD7" type="number" min="0.1" step="0.1" placeholder="D7 %" />
+            <button class="analysis-primary" type="submit">Save target</button>
+          </form>
+          <div id="targetList"></div>
+        </section>
+        <section><h3>Decision history</h3><div id="decisionHistory"></div></section>
+        <section><h3>Archived Weekly Briefs</h3><div id="weeklyBriefArchive"></div></section>
         <section class="slack-digest-section">
           <h3>Weekly Slack digest</h3>
           <p id="slackDigestStatus">Loading digest configuration…</p>

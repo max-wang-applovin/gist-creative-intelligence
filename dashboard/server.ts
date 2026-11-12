@@ -33,6 +33,14 @@ import {
 } from "../bot/lib/meta-video.js";
 import { normalizeCreativeName } from "../bot/lib/names.js";
 import {
+  activeMetaAdAccountId,
+  activeProfileId,
+  activeProfileUsesLegacyStorage,
+  configuredDataProfiles,
+  runWithDataProfile,
+  type DataProfile,
+} from "../bot/lib/data-profile.js";
+import {
   analyzeCreative,
   creativeFingerprint,
   CreativeAnalysisStore,
@@ -95,6 +103,10 @@ if (hosted && (!dashboardUsername || !dashboardPassword)) {
     "Dashboard authentication is required in production. Set DASHBOARD_USERNAME and DASHBOARD_PASSWORD.",
   );
 }
+const dataProfiles = configuredDataProfiles();
+const dataProfileById = new Map(
+  dataProfiles.map((profile) => [profile.id, profile]),
+);
 const maxDays = 90;
 const maxScanLimit = 10_000;
 
@@ -123,16 +135,47 @@ const scanConfig = {
   concurrency: boundedEnvInt("CREATIVE_SCAN_CONCURRENCY", 4, 1, 20),
 };
 let nextScheduledScanAt: string | null = null;
-const analysisStore = new CreativeAnalysisStore(
-  join(dataDirectory, "creative-analysis.json"),
-);
-const workspaceStore = new WorkspaceStore(
-  join(dataDirectory, "creative-workspace.json"),
-);
-const slackDigestStatePath = join(
-  dataDirectory,
-  "slack-digest-state.json",
-);
+const analysisStores = new Map<string, CreativeAnalysisStore>();
+function analysisStore(): CreativeAnalysisStore {
+  const profileId = activeProfileId();
+  let store = analysisStores.get(profileId);
+  if (!store) {
+    store = new CreativeAnalysisStore(
+      join(
+        dataDirectory,
+        activeProfileUsesLegacyStorage()
+          ? "creative-analysis.json"
+          : `creative-analysis-${profileId}.json`,
+      ),
+    );
+    analysisStores.set(profileId, store);
+  }
+  return store;
+}
+const workspaceStores = new Map<string, WorkspaceStore>();
+function workspaceStore(): WorkspaceStore {
+  const profileId = activeProfileId();
+  let store = workspaceStores.get(profileId);
+  if (!store) {
+    store = new WorkspaceStore(
+      join(
+        dataDirectory,
+        activeProfileUsesLegacyStorage()
+          ? "creative-workspace.json"
+          : `creative-workspace-${profileId}.json`,
+      ),
+    );
+    workspaceStores.set(profileId, store);
+  }
+  return store;
+}
+const slackDigestStatePath = () =>
+  join(
+    dataDirectory,
+    activeProfileUsesLegacyStorage()
+      ? "slack-digest-state.json"
+      : `slack-digest-state-${activeProfileId()}.json`,
+  );
 type SlackDigestState = {
   lastSentAt: string | null;
   lastRangeUntil: string | null;
@@ -143,6 +186,7 @@ type SlackDigestState = {
 
 type ScanJob = {
   id: string;
+  profileId: string;
   status: "queued" | "running" | "completed" | "failed";
   total: number;
   completed: number;
@@ -269,7 +313,11 @@ const MEDIA_CACHE_TTL_MS = 10 * 60_000;
 const SLICE_CACHE_TTL_MS = 30 * 60_000;
 const FATIGUE_CACHE_TTL_MS = 30 * 60_000;
 const SNAPSHOTS_PER_KIND = 24;
-const dashboardSnapshotDirectory = join(dataDirectory, "dashboard-cache");
+const dashboardSnapshotRoot = join(dataDirectory, "dashboard-cache");
+const dashboardSnapshotDirectory = () =>
+  activeProfileUsesLegacyStorage()
+    ? dashboardSnapshotRoot
+    : join(dashboardSnapshotRoot, activeProfileId());
 const dataCache = new Map<string, CacheEntry>();
 const dataInflight = new Map<string, Promise<DashboardPayload>>();
 const mediaCache = new Map<
@@ -299,17 +347,15 @@ const fatigueInflight = new Map<string, Promise<FatiguePayload>>();
 const AD_MEDIA_CACHE_TTL_MS = 6 * 60 * 60_000;
 const ADMANAGE_ENRICHMENT_TTL_MS = 60 * 60_000;
 const AD_MEDIA_CACHE_LIMIT = 5_000;
-const adMediaCachePath = join(
-  dashboardSnapshotDirectory,
-  "ad-media-v1.json",
-);
-const adMediaStore = new Map<
+const adMediaCachePath = () =>
+  join(dashboardSnapshotDirectory(), "ad-media-v1.json");
+const adMediaStores = new Map<
   string,
-  { savedAt: number; media: MetaAdMedia }
+  Map<string, { savedAt: number; media: MetaAdMedia }>
 >();
-let adMediaLoadPromise: Promise<void> | null = null;
-let adMediaWriteTail: Promise<void> = Promise.resolve();
-let adManageLastFetchAt = 0;
+const adMediaLoadPromises = new Map<string, Promise<void>>();
+const adMediaWriteTails = new Map<string, Promise<void>>();
+const adManageLastFetchAt = new Map<string, number>();
 
 type PayloadSnapshotKind =
   | "metrics"
@@ -330,7 +376,7 @@ function payloadSnapshotPath(
   range: { since: string; until: string },
 ): string {
   return join(
-    dashboardSnapshotDirectory,
+    dashboardSnapshotDirectory(),
     `${kind}_${range.since}_${range.until}.json`,
   );
 }
@@ -365,8 +411,8 @@ async function writePayloadSnapshot<T>(
   range: { since: string; until: string },
   value: T,
 ): Promise<void> {
-  await mkdir(dashboardSnapshotDirectory, { recursive: true });
   const path = payloadSnapshotPath(kind, range);
+  await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
   const snapshot: PayloadSnapshot<T> = {
     version: 1,
@@ -379,24 +425,32 @@ async function writePayloadSnapshot<T>(
     mode: 0o600,
   });
   await rename(temporary, path);
-  const older = (await readdir(dashboardSnapshotDirectory))
+  const directory = dashboardSnapshotDirectory();
+  const older = (await readdir(directory))
     .filter((name) => name.startsWith(`${kind}_`) && name.endsWith(".json"))
     .sort()
     .reverse()
     .slice(SNAPSHOTS_PER_KIND);
   await Promise.all(
     older.map((name) =>
-      unlink(join(dashboardSnapshotDirectory, name)).catch(() => undefined),
+      unlink(join(directory, name)).catch(() => undefined),
     ),
   );
 }
 
 function loadAdMediaStore(): Promise<void> {
-  if (adMediaLoadPromise) return adMediaLoadPromise;
-  adMediaLoadPromise = (async () => {
+  const profileId = activeProfileId();
+  const existing = adMediaLoadPromises.get(profileId);
+  if (existing) return existing;
+  const store =
+    adMediaStores.get(profileId) ??
+    new Map<string, { savedAt: number; media: MetaAdMedia }>();
+  adMediaStores.set(profileId, store);
+  const path = adMediaCachePath();
+  const pending = (async () => {
     try {
       const parsed = JSON.parse(
-        await readFile(adMediaCachePath, "utf8"),
+        await readFile(path, "utf8"),
       ) as {
         version: 1;
         entries: Record<
@@ -412,22 +466,30 @@ function loadAdMediaStore(): Promise<void> {
           Number.isFinite(savedAt) &&
           entry.media?.adId === adId
         ) {
-          adMediaStore.set(adId, { savedAt, media: entry.media });
+          store.set(adId, { savedAt, media: entry.media });
         }
       }
     } catch {
       // The first successful media refresh creates the cache.
     }
   })();
-  return adMediaLoadPromise;
+  adMediaLoadPromises.set(profileId, pending);
+  return pending;
 }
 
 function persistAdMediaStore(): Promise<void> {
-  adMediaWriteTail = adMediaWriteTail
+  const profileId = activeProfileId();
+  const store =
+    adMediaStores.get(profileId) ??
+    new Map<string, { savedAt: number; media: MetaAdMedia }>();
+  adMediaStores.set(profileId, store);
+  const path = adMediaCachePath();
+  const tail = adMediaWriteTails.get(profileId) ?? Promise.resolve();
+  const pending = tail
     .catch(() => undefined)
     .then(async () => {
-      await mkdir(dashboardSnapshotDirectory, { recursive: true });
-      const entries = [...adMediaStore.entries()]
+      await mkdir(dirname(path), { recursive: true });
+      const entries = [...store.entries()]
         .sort((a, b) => b[1].savedAt - a[1].savedAt)
         .slice(0, AD_MEDIA_CACHE_LIMIT);
       const value = {
@@ -442,22 +504,23 @@ function persistAdMediaStore(): Promise<void> {
           ]),
         ),
       };
-      const temporary = `${adMediaCachePath}.${process.pid}.${Date.now()}.tmp`;
+      const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
       await writeFile(temporary, `${JSON.stringify(value)}\n`, {
         mode: 0o600,
       });
-      await rename(temporary, adMediaCachePath);
+      await rename(temporary, path);
       const retained = new Set(
-        [...adMediaStore.entries()]
+        [...store.entries()]
           .sort((a, b) => b[1].savedAt - a[1].savedAt)
           .slice(0, AD_MEDIA_CACHE_LIMIT)
           .map(([adId]) => adId),
       );
-      for (const adId of adMediaStore.keys()) {
-        if (!retained.has(adId)) adMediaStore.delete(adId);
+      for (const adId of store.keys()) {
+        if (!retained.has(adId)) store.delete(adId);
       }
     });
-  return adMediaWriteTail;
+  adMediaWriteTails.set(profileId, pending);
+  return pending;
 }
 
 type DeliveryMetrics = {
@@ -664,11 +727,18 @@ function resolveRange(url: URL): { since: string; until: string } {
   return defaultDateRange(rawDays);
 }
 
+function rangeCacheKey(range: {
+  since: string;
+  until: string;
+}): string {
+  return `${activeProfileId()}:${range.since}:${range.until}`;
+}
+
 async function refreshPayload(range: {
   since: string;
   until: string;
 }, forceAdjust = false): Promise<DashboardPayload> {
-  const key = `${range.since}:${range.until}`;
+  const key = rangeCacheKey(range);
   const pending = dataInflight.get(key);
   if (pending) return pending;
 
@@ -769,7 +839,7 @@ async function buildPayload(
   range: { since: string; until: string },
   force = false,
 ): Promise<DashboardPayload> {
-  const key = `${range.since}:${range.until}`;
+  const key = rangeCacheKey(range);
   let source: PayloadFreshness["source"] = "memory";
   let cached = dataCache.get(key);
   if (!cached) {
@@ -828,7 +898,7 @@ async function refreshMediaPayload(
   range: { since: string; until: string },
   force = false,
 ): Promise<MediaPayload> {
-  const key = `${range.since}:${range.until}`;
+  const key = rangeCacheKey(range);
   const pending = mediaInflight.get(key);
   if (pending) return pending;
 
@@ -845,13 +915,15 @@ async function refreshMediaPayload(
       ...new Set(dashboard.creatives.flatMap((creative) => creative.adIds)),
     ];
     await loadAdMediaStore();
+    const profileId = activeProfileId();
+    const mediaStore = adMediaStores.get(profileId)!;
     let mediaStoreChanged = false;
     const priorPayload = mediaCache.get(key)?.value;
     const priorSavedAt = Date.parse(priorPayload?.generatedAt ?? "");
     if (Number.isFinite(priorSavedAt)) {
       for (const media of Object.values(priorPayload?.creatives ?? {}).flat()) {
-        if (!adMediaStore.has(media.adId)) {
-          adMediaStore.set(media.adId, { savedAt: priorSavedAt, media });
+        if (!mediaStore.has(media.adId)) {
+          mediaStore.set(media.adId, { savedAt: priorSavedAt, media });
           mediaStoreChanged = true;
         }
       }
@@ -860,7 +932,7 @@ async function refreshMediaPayload(
     const idsToFetch = force
       ? adIds
       : adIds.filter((adId) => {
-          const cached = adMediaStore.get(adId);
+          const cached = mediaStore.get(adId);
           return (
             !cached ||
             !cached.media.cardThumbnailUrl ||
@@ -869,7 +941,7 @@ async function refreshMediaPayload(
         });
     const mediaByAd: Record<string, MetaAdMedia> = Object.fromEntries(
       adIds.flatMap((adId) => {
-        const cached = adMediaStore.get(adId);
+        const cached = mediaStore.get(adId);
         return cached ? [[adId, { ...cached.media }]] : [];
       }),
     );
@@ -879,7 +951,8 @@ async function refreshMediaPayload(
     const needsAssetEnrichment =
       force ||
       idsToFetch.length > 0 ||
-      (now - adManageLastFetchAt >= ADMANAGE_ENRICHMENT_TTL_MS &&
+      (now - (adManageLastFetchAt.get(profileId) ?? 0) >=
+        ADMANAGE_ENRICHMENT_TTL_MS &&
         Object.values(mediaByAd).some(
           (media) =>
             !media.videoUrl || (media.thumbnailWidth ?? 0) < 1_000,
@@ -914,7 +987,7 @@ async function refreshMediaPayload(
       >;
       for (const [adId, media] of Object.entries(fetchedMedia)) {
         mediaByAd[adId] = media;
-        adMediaStore.set(adId, { savedAt: now, media });
+        mediaStore.set(adId, { savedAt: now, media });
         mediaStoreChanged = true;
       }
     }
@@ -936,11 +1009,11 @@ async function refreshMediaPayload(
             media.thumbnailUrl = asset.thumbnailUrl;
           }
         }
-        adMediaStore.set(adId, { savedAt: now, media: { ...media } });
+        mediaStore.set(adId, { savedAt: now, media: { ...media } });
         mediaStoreChanged = true;
       }
       if (adManageConfigured && needsAssetEnrichment) {
-        adManageLastFetchAt = now;
+        adManageLastFetchAt.set(profileId, now);
       }
     } else {
       warnings.push(
@@ -1032,7 +1105,7 @@ async function buildMediaPayload(
   range: { since: string; until: string },
   force = false,
 ): Promise<MediaPayload> {
-  const key = `${range.since}:${range.until}`;
+  const key = rangeCacheKey(range);
   let source: PayloadFreshness["source"] = "memory";
   let cached = mediaCache.get(key);
   if (!cached) {
@@ -1144,11 +1217,17 @@ async function buildAnalysisPayload(range: {
     status: "scanned" | "stale" | "unscanned";
     analysis: CreativeAnalysis | null;
   }>;
+  scanQueue: Array<{
+    creativeId: string;
+    creativeName: string;
+    status: "stale" | "unscanned";
+    spend: number;
+    cpi: number;
+    d7: number | null;
+  }>;
 }> {
   const baseDashboard = await buildPayload(range);
-  const cachedMedia = mediaCache.get(
-    `${range.since}:${range.until}`,
-  )?.value;
+  const cachedMedia = mediaCache.get(rangeCacheKey(range))?.value;
   const fingerprintsValidated = Boolean(cachedMedia);
   const dashboard: DashboardPayload = cachedMedia
     ? {
@@ -1160,7 +1239,7 @@ async function buildAnalysisPayload(range: {
       }
     : baseDashboard;
   const saved = new Map(
-    (await analysisStore.list()).map((record) => [record.creativeId, record]),
+    (await analysisStore().list()).map((record) => [record.creativeId, record]),
   );
   let scanned = 0;
   let stale = 0;
@@ -1184,6 +1263,36 @@ async function buildAnalysisPayload(range: {
       analysis,
     };
   });
+  const statusById = new Map(
+    records.map((record) => [record.creativeId, record.status]),
+  );
+  const scanQueue = dashboard.creatives
+    .flatMap((creative) => {
+      if (creative.media.length === 0) return [];
+      const status = statusById.get(creative.creativeId);
+      return status === "unscanned" || status === "stale"
+        ? [
+            {
+              creativeId: creative.creativeId,
+              creativeName: creative.creativeName,
+              status,
+              spend: creative.metaSpend,
+              cpi: creative.cpi,
+              d7:
+                creative.adjustRetentionDenD7 > 0
+                  ? creative.adjustRetentionD7
+                  : null,
+            },
+          ]
+        : [];
+    })
+    .sort(
+      (a, b) =>
+        Number(a.status === "stale") -
+          Number(b.status === "stale") ||
+        b.spend - a.spend,
+    )
+    .slice(0, 20);
   return {
     available: Boolean(process.env.OPENAI_API_KEY?.trim()),
     model: process.env.OPENAI_ANALYSIS_MODEL?.trim() || "gpt-4.1-mini",
@@ -1203,6 +1312,7 @@ async function buildAnalysisPayload(range: {
       concurrency: scanConfig.concurrency,
     },
     records,
+    scanQueue,
   };
 }
 
@@ -1240,8 +1350,33 @@ async function runScanJob(
   job.status = "running";
   try {
     const dashboard = await buildEnrichedPayload(range);
+    const saved = new Map(
+      (await analysisStore().list()).map((record) => [
+        record.creativeId,
+        record,
+      ]),
+    );
     const candidates = dashboard.creatives
       .filter((creative) => creative.media.length > 0)
+      .sort((a, b) => {
+        if (force) return b.metaSpend - a.metaSpend;
+        const aSaved = saved.get(a.creativeId);
+        const bSaved = saved.get(b.creativeId);
+        const aPriority = !aSaved
+          ? 0
+          : aSaved.fingerprint === creativeFingerprint(a)
+            ? 2
+            : 1;
+        const bPriority = !bSaved
+          ? 0
+          : bSaved.fingerprint === creativeFingerprint(b)
+            ? 2
+            : 1;
+        return (
+          aPriority - bPriority ||
+          b.metaSpend - a.metaSpend
+        );
+      })
       .slice(0, limit);
     job.total = candidates.length;
     let cursor = 0;
@@ -1251,12 +1386,12 @@ async function runScanJob(
         const creative = candidates[cursor++]!;
         job.current = creative.creativeName;
         try {
-          const existing = await analysisStore.get(creative.creativeId);
+          const existing = await analysisStore().get(creative.creativeId);
           const fingerprint = creativeFingerprint(creative);
           if (!force && existing?.fingerprint === fingerprint) {
             job.skipped += 1;
           } else {
-            await analysisStore.put(
+            await analysisStore().put(
               await analyzeCreativeWithRetry(creative),
             );
             job.scanned += 1;
@@ -1412,7 +1547,7 @@ async function buildVideoMetricsPayload(
   range: { since: string; until: string },
   force = false,
 ): Promise<VideoMetricsPayload> {
-  const cacheKey = `${range.since}:${range.until}`;
+  const cacheKey = rangeCacheKey(range);
   const cached = videoCache.get(cacheKey);
   if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
   const dashboard = await buildPayload(range);
@@ -1480,7 +1615,7 @@ async function refreshFatiguePayload(range: {
   since: string;
   until: string;
 }): Promise<FatiguePayload> {
-  const key = `${range.since}:${range.until}`;
+  const key = rangeCacheKey(range);
   const pending = fatigueInflight.get(key);
   if (pending) return pending;
   const promise = (async () => {
@@ -1633,7 +1768,7 @@ async function buildFatiguePayload(
   range: { since: string; until: string },
   force = false,
 ): Promise<FatiguePayload> {
-  const key = `${range.since}:${range.until}`;
+  const key = rangeCacheKey(range);
   if (force) return refreshFatiguePayload(range);
   let cached = fatigueCache.get(key);
   if (!cached) {
@@ -1749,7 +1884,7 @@ async function computeSlicePayload(
   range: { since: string; until: string },
   dimension: MetaBreakdownDimension,
 ): Promise<SlicePayload> {
-  const cacheKey = `${range.since}:${range.until}:${dimension}`;
+  const cacheKey = `${rangeCacheKey(range)}:${dimension}`;
 
   const dashboard = await buildPayload(range);
   const creativeByAd = new Map<string, string>();
@@ -1844,7 +1979,7 @@ async function refreshSlicePayload(
   range: { since: string; until: string },
   dimension: MetaBreakdownDimension,
 ): Promise<SlicePayload> {
-  const key = `${range.since}:${range.until}:${dimension}`;
+  const key = `${rangeCacheKey(range)}:${dimension}`;
   const pending = sliceInflight.get(key);
   if (pending) return pending;
   const promise = computeSlicePayload(range, dimension).finally(() =>
@@ -1859,7 +1994,7 @@ async function buildSlicePayload(
   dimension: MetaBreakdownDimension,
   force = false,
 ): Promise<SlicePayload> {
-  const cacheKey = `${range.since}:${range.until}:${dimension}`;
+  const cacheKey = `${rangeCacheKey(range)}:${dimension}`;
   if (force) return refreshSlicePayload(range, dimension);
   let cached = sliceCache.get(cacheKey);
   if (!cached) {
@@ -1908,7 +2043,7 @@ async function buildDebriefVisualLearnings(
   risks: string[];
 }> {
   const analyses = new Map(
-    (await analysisStore.list()).map((analysis) => [
+    (await analysisStore().list()).map((analysis) => [
       analysis.creativeId,
       analysis,
     ]),
@@ -2089,7 +2224,7 @@ function compactDebriefPayload(
 async function readSlackDigestState(): Promise<SlackDigestState> {
   try {
     const value = JSON.parse(
-      await readFile(slackDigestStatePath, "utf8"),
+      await readFile(slackDigestStatePath(), "utf8"),
     ) as SlackDigestState;
     return {
       lastSentAt: value.lastSentAt ?? null,
@@ -2112,12 +2247,13 @@ async function readSlackDigestState(): Promise<SlackDigestState> {
 async function writeSlackDigestState(
   value: SlackDigestState,
 ): Promise<void> {
-  await mkdir(dirname(slackDigestStatePath), { recursive: true });
-  const temporary = `${slackDigestStatePath}.${process.pid}.${Date.now()}.tmp`;
+  const path = slackDigestStatePath();
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
     mode: 0o600,
   });
-  await rename(temporary, slackDigestStatePath);
+  await rename(temporary, path);
 }
 
 function dashboardPublicUrl(): string {
@@ -2224,17 +2360,25 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     requestAuthentication(res);
     return;
   }
+  const requestedProfile = url.searchParams.get("profile");
+  if (
+    requestedProfile &&
+    !dataProfileById.has(requestedProfile.toLowerCase())
+  ) {
+    json(res, 400, { error: `Unknown data profile: ${requestedProfile}` });
+    return;
+  }
 
   if (url.pathname === "/api/experiments") {
     try {
       if (req.method === "GET") {
-        json(res, 200, { experiments: await workspaceStore.listExperiments() });
+        json(res, 200, { experiments: await workspaceStore().listExperiments() });
         return;
       }
       const body = await readJsonBody(req);
       if (req.method === "DELETE") {
         const id = url.searchParams.get("id") ?? "";
-        json(res, (await workspaceStore.deleteExperiment(id)) ? 200 : 404, {
+        json(res, (await workspaceStore().deleteExperiment(id)) ? 200 : 404, {
           deleted: id,
         });
         return;
@@ -2258,7 +2402,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
         throw new Error("decision is required when status is Decided.");
       }
       json(res, 200, {
-        experiment: await workspaceStore.upsertExperiment({
+        experiment: await workspaceStore().upsertExperiment({
           id: body.id ? String(body.id) : undefined,
           name: required("name"),
           hypothesis: required("hypothesis"),
@@ -2299,13 +2443,13 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (url.pathname === "/api/saved-reports") {
     try {
       if (req.method === "GET") {
-        json(res, 200, { reports: await workspaceStore.listSavedReports() });
+        json(res, 200, { reports: await workspaceStore().listSavedReports() });
         return;
       }
       const body = await readJsonBody(req);
       if (req.method === "DELETE") {
         const id = url.searchParams.get("id") ?? "";
-        json(res, (await workspaceStore.deleteSavedReport(id)) ? 200 : 404, {
+        json(res, (await workspaceStore().deleteSavedReport(id)) ? 200 : 404, {
           deleted: id,
         });
         return;
@@ -2320,7 +2464,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
         throw new Error("name and a same-origin report URL are required.");
       }
       json(res, 200, {
-        report: await workspaceStore.saveReport(
+        report: await workspaceStore().saveReport(
           name.slice(0, 200),
           reportUrl.slice(0, 2_000),
         ),
@@ -2336,7 +2480,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (url.pathname === "/api/test-briefs") {
     try {
       if (req.method === "GET") {
-        json(res, 200, { briefs: await workspaceStore.listTestBriefs() });
+        json(res, 200, { briefs: await workspaceStore().listTestBriefs() });
         return;
       }
       if (req.method !== "POST") {
@@ -2351,7 +2495,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
         throw new Error("status must be Draft, Ready, or Launched.");
       }
       json(res, 200, {
-        brief: await workspaceStore.upsertTestBrief({
+        brief: await workspaceStore().upsertTestBrief({
           id: body.id ? String(body.id) : undefined,
           title: title.slice(0, 300),
           sourceBrand: String(body.sourceBrand ?? "").trim().slice(0, 200),
@@ -2365,6 +2509,242 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
           audience: String(body.audience ?? "").trim().slice(0, 1_000),
           variants: String(body.variants ?? "").trim().slice(0, 3_000),
           status: status as "Draft" | "Ready" | "Launched",
+        }),
+      });
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/targets") {
+    try {
+      if (req.method === "GET") {
+        json(res, 200, { targets: await workspaceStore().listTargets() });
+        return;
+      }
+      if (req.method === "DELETE") {
+        const id = url.searchParams.get("id") ?? "";
+        json(res, (await workspaceStore().deleteTarget(id)) ? 200 : 404, {
+          deleted: id,
+        });
+        return;
+      }
+      if (req.method !== "POST") {
+        json(res, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const dimension = String(body.dimension ?? "Global");
+      if (!["Global", "OS", "Source", "Format"].includes(dimension)) {
+        throw new Error("dimension must be Global, OS, Source, or Format.");
+      }
+      const segment =
+        dimension === "Global"
+          ? "All"
+          : String(body.segment ?? "").trim().slice(0, 200);
+      if (!segment) throw new Error("segment is required.");
+      const optionalNumber = (key: string): number | null => {
+        const value = body[key];
+        if (value === "" || value === null || value === undefined) return null;
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          throw new Error(`${key} must be a positive number.`);
+        }
+        return Math.round(parsed * 100) / 100;
+      };
+      const values = {
+        cpi: optionalNumber("cpi"),
+        cpsu: optionalNumber("cpsu"),
+        d1: optionalNumber("d1"),
+        d3: optionalNumber("d3"),
+        d7: optionalNumber("d7"),
+      };
+      if (
+        [values.d1, values.d3, values.d7].some(
+          (value) => value !== null && value > 100,
+        )
+      ) {
+        throw new Error("Retention targets must be percentages from 0 to 100.");
+      }
+      if (Object.values(values).every((value) => value === null)) {
+        throw new Error("Set at least one performance target.");
+      }
+      json(res, 200, {
+        target: await workspaceStore().upsertTarget({
+          id: body.id ? String(body.id) : undefined,
+          dimension: dimension as "Global" | "OS" | "Source" | "Format",
+          segment,
+          ...values,
+        }),
+      });
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/decisions") {
+    try {
+      if (req.method === "GET") {
+        json(res, 200, { decisions: await workspaceStore().listDecisions() });
+        return;
+      }
+      if (req.method !== "POST") {
+        json(res, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const decision = String(body.decision ?? "");
+      if (
+        !["Increase", "Hold", "Reduce", "Scale", "Pause", "Iterate"].includes(
+          decision,
+        )
+      ) {
+        throw new Error("Unsupported decision.");
+      }
+      const creativeId = String(body.creativeId ?? "").trim();
+      const creativeName = String(body.creativeName ?? "").trim();
+      if (!creativeId || !creativeName) {
+        throw new Error("creativeId and creativeName are required.");
+      }
+      const rawMetrics =
+        body.metrics && typeof body.metrics === "object"
+          ? (body.metrics as Record<string, unknown>)
+          : {};
+      const metrics = Object.fromEntries(
+        Object.entries(rawMetrics)
+          .slice(0, 30)
+          .map(([key, value]) => {
+            const number = value == null ? null : Number(value);
+            return [
+              key.slice(0, 100),
+              number !== null && Number.isFinite(number) ? number : null,
+            ];
+          }),
+      );
+      json(res, 200, {
+        decision: await workspaceStore().addDecision({
+          creativeId: creativeId.slice(0, 300),
+          creativeName: creativeName.slice(0, 2_000),
+          decision: decision as
+            | "Increase"
+            | "Hold"
+            | "Reduce"
+            | "Scale"
+            | "Pause"
+            | "Iterate",
+          reason: String(body.reason ?? "").trim().slice(0, 5_000),
+          owner: String(body.owner ?? "").trim().slice(0, 200),
+          source: String(body.source ?? "Dashboard").trim().slice(0, 200),
+          metrics,
+        }),
+      });
+    } catch (error) {
+      json(res, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/weekly-briefs") {
+    try {
+      if (req.method === "GET") {
+        json(res, 200, { briefs: await workspaceStore().listWeeklyBriefs() });
+        return;
+      }
+      if (req.method === "DELETE") {
+        const id = url.searchParams.get("id") ?? "";
+        json(
+          res,
+          (await workspaceStore().deleteWeeklyBrief(id)) ? 200 : 404,
+          { deleted: id },
+        );
+        return;
+      }
+      if (req.method !== "POST") {
+        json(res, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const range = body.range as
+        | { since?: unknown; until?: unknown }
+        | undefined;
+      if (
+        !range ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(range.since ?? "")) ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(range.until ?? ""))
+      ) {
+        throw new Error("A valid range is required.");
+      }
+      const since = String(range.since);
+      const until = String(range.until);
+      const validDate = (value: string) => {
+        const parsed = new Date(`${value}T00:00:00Z`);
+        return (
+          Number.isFinite(parsed.getTime()) &&
+          parsed.toISOString().slice(0, 10) === value
+        );
+      };
+      if (
+        !validDate(since) ||
+        !validDate(until) ||
+        since > until
+      ) {
+        throw new Error("Brief range dates must be valid and in order.");
+      }
+      const metricsInput =
+        body.metrics && typeof body.metrics === "object"
+          ? (body.metrics as Record<string, unknown>)
+          : {};
+      const highlightsInput =
+        body.highlights && typeof body.highlights === "object"
+          ? (body.highlights as Record<string, unknown>)
+          : {};
+      const strings = (key: string): string[] =>
+        Array.isArray(highlightsInput[key])
+          ? (highlightsInput[key] as unknown[])
+              .map((value) => String(value).slice(0, 2_000))
+              .slice(0, 10)
+          : [];
+      const metric = (key: string, nullable = false): number | null => {
+        const raw = metricsInput[key];
+        if (nullable && (raw === null || raw === undefined)) return null;
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value < 0) {
+          throw new Error(`${key} must be a non-negative number.`);
+        }
+        return value;
+      };
+      json(res, 200, {
+        brief: await workspaceStore().addWeeklyBrief({
+          title:
+            String(body.title ?? "Weekly Creative Brief")
+              .trim()
+              .slice(0, 300) || "Weekly Creative Brief",
+          range: {
+            since,
+            until,
+          },
+          metrics: {
+            spend: metric("spend")!,
+            installs: metric("installs")!,
+            cpi: metric("cpi", true),
+            d7Ready: metric("d7Ready")!,
+            scaleOpportunities: metric("scaleOpportunities")!,
+            fatiguing: metric("fatiguing", true),
+          },
+          highlights: {
+            working: strings("working"),
+            increase: strings("increase"),
+            reduce: strings("reduce"),
+            fatigue: strings("fatigue"),
+          },
         }),
       });
     } catch (error) {
@@ -2524,6 +2904,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
       }
       const job: ScanJob = {
         id: randomUUID(),
+        profileId: activeProfileId(),
         status: "queued",
         total: 0,
         completed: 0,
@@ -2549,6 +2930,19 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   if (req.method !== "GET") {
     json(res, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  if (url.pathname === "/api/config") {
+    json(res, 200, {
+      activeProfile: activeProfileId(),
+      profiles: dataProfiles.map((profile) => ({
+        id: profile.id,
+        label: profile.label,
+        metaAdAccountId: profile.metaAdAccountId,
+        adjustAppName: profile.adjustAppName,
+      })),
+    });
     return;
   }
 
@@ -2654,7 +3048,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (url.pathname === "/api/analysis/status") {
     const jobId = url.searchParams.get("jobId") ?? "";
     const job = scanJobs.get(jobId);
-    if (!job) {
+    if (!job || job.profileId !== activeProfileId()) {
       json(res, 404, { error: "Scan job not found." });
     } else {
       json(res, 200, { job });
@@ -2769,7 +3163,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
       const range = resolveRange(url);
       const creativeId = url.searchParams.get("creativeId") ?? "";
       if (!creativeId) throw new Error("creativeId is required.");
-      const cacheKey = `${range.since}:${range.until}:${creativeId}`;
+      const cacheKey = `${rangeCacheKey(range)}:${creativeId}`;
       const cached = detailCache.get(cacheKey);
       if (cached && cached.expiresAt > Date.now()) {
         json(res, 200, cached.value);
@@ -2838,7 +3232,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     try {
       const adId = url.searchParams.get("adId") ?? "";
       const format = url.searchParams.get("format") ?? "MOBILE_FEED_STANDARD";
-      const cacheKey = `${adId}:${format}`;
+      const cacheKey = `${activeProfileId()}:${adId}:${format}`;
       const cached = previewCache.get(cacheKey);
       if (cached && cached.expiresAt > Date.now()) {
         json(res, 200, { adId, format, src: cached.src });
@@ -2903,17 +3297,22 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   }
 }
 
-const scanScheduleStatePath = join(
-  dataDirectory,
-  "creative-analysis-schedule.json",
-);
+const scanScheduleStatePath = (profileId: string) =>
+  join(
+    dataDirectory,
+    activeProfileUsesLegacyStorage()
+      ? "creative-analysis-schedule.json"
+      : `creative-analysis-schedule-${profileId}.json`,
+  );
 
 async function writeScheduleState(job: ScanJob): Promise<void> {
-  await mkdir(dirname(scanScheduleStatePath), { recursive: true });
+  const statePath = scanScheduleStatePath(job.profileId);
+  await mkdir(dirname(statePath), { recursive: true });
   await writeFile(
-    scanScheduleStatePath,
+    statePath,
     `${JSON.stringify(
       {
+        profileId: job.profileId,
         lastTriggeredAt: job.startedAt,
         jobId: job.id,
         status: job.status,
@@ -2932,6 +3331,7 @@ async function writeScheduleState(job: ScanJob): Promise<void> {
 async function runScheduledScan(): Promise<void> {
   const job: ScanJob = {
     id: randomUUID(),
+    profileId: activeProfileId(),
     status: "queued",
     total: 0,
     completed: 0,
@@ -2970,37 +3370,52 @@ function scheduleNextAutoScan(): void {
   nextScheduledScanAt = next.toISOString();
   const delay = next.getTime() - now.getTime();
   setTimeout(() => {
-    void runScheduledScan().finally(scheduleNextAutoScan);
+    void (async () => {
+      for (const profile of dataProfiles) {
+        await runWithDataProfile(profile, runScheduledScan).catch(
+          (error: unknown) => {
+            process.stderr.write(
+              `Scheduled ${profile.id} creative scan failed: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          },
+        );
+      }
+    })().finally(scheduleNextAutoScan);
   }, delay);
 }
 
 function scheduleDebriefRefresh(): void {
   if (
     !process.env.ADJUST_API_TOKEN?.trim() ||
-    !process.env.META_ACCESS_TOKEN?.trim() ||
-    !process.env.META_AD_ACCOUNT_ID?.trim()
+    !process.env.META_ACCESS_TOKEN?.trim()
   ) {
     return;
   }
-  const refresh = () => {
-    void refreshDebriefPayload(resolveDebriefRange(null, null)).catch(
-      (error: unknown) => {
-        process.stderr.write(
-          `Scheduled debrief refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
-      },
-    );
+  const refresh = async () => {
+    for (const profile of dataProfiles) {
+      await runWithDataProfile(profile, () =>
+        refreshDebriefPayload(resolveDebriefRange(null, null)),
+      ).catch((error: unknown) => {
+          process.stderr.write(
+            `Scheduled ${profile.id} debrief refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        });
+    }
   };
   setTimeout(() => {
-    void buildDebriefPayload(resolveDebriefRange(null, null)).catch(
-      (error: unknown) => {
-        process.stderr.write(
-          `Initial debrief warm-up failed: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
-      },
+    void Promise.all(
+      dataProfiles.map((profile) =>
+        runWithDataProfile(profile, () =>
+          buildDebriefPayload(resolveDebriefRange(null, null)),
+        ).catch((error: unknown) => {
+            process.stderr.write(
+              `Initial ${profile.id} debrief warm-up failed: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          }),
+      ),
     );
   }, 90_000);
-  setInterval(refresh, 30 * 60_000);
+  setInterval(() => void refresh(), 30 * 60_000);
 }
 
 let dashboardPrewarmRunning = false;
@@ -3040,9 +3455,15 @@ async function prewarmDashboardWindows(): Promise<void> {
   }
 }
 
+async function prewarmAllProfiles(): Promise<void> {
+  for (const profile of dataProfiles) {
+    await runWithDataProfile(profile, prewarmDashboardWindows);
+  }
+}
+
 function scheduleDashboardPrewarm(): void {
   if (!process.env.ADJUST_API_TOKEN?.trim()) return;
-  setTimeout(() => void prewarmDashboardWindows(), 3 * 60_000);
+  setTimeout(() => void prewarmAllProfiles(), 3 * 60_000);
   const scheduleDaily = () => {
     const now = new Date();
     const next = new Date(now);
@@ -3051,7 +3472,7 @@ function scheduleDashboardPrewarm(): void {
       next.setUTCDate(next.getUTCDate() + 1);
     }
     setTimeout(() => {
-      void prewarmDashboardWindows().finally(scheduleDaily);
+      void prewarmAllProfiles().finally(scheduleDaily);
     }, next.getTime() - now.getTime());
   };
   scheduleDaily();
@@ -3059,23 +3480,25 @@ function scheduleDashboardPrewarm(): void {
 
 function scheduleWeeklySlackDigest(): void {
   if (!slackDigestConfig().configured) return;
-  const sendIfDue = async (): Promise<void> => {
-    const now = new Date();
-    const state = await readSlackDigestState();
-    const latestDue = new Date(now);
-    const daysSinceMonday = (now.getUTCDay() - 1 + 7) % 7;
-    latestDue.setUTCDate(now.getUTCDate() - daysSinceMonday);
-    latestDue.setUTCHours(14, 0, 0, 0);
-    if (latestDue.getTime() > now.getTime()) {
-      latestDue.setUTCDate(latestDue.getUTCDate() - 7);
-    }
-    if (
-      !state.lastSentAt ||
-      Date.parse(state.lastSentAt) < latestDue.getTime()
-    ) {
-      await deliverWeeklySlackDigest();
-    }
-  };
+  const profile = dataProfiles[0]!;
+  const sendIfDue = (): Promise<void> =>
+    runWithDataProfile(profile, async () => {
+      const now = new Date();
+      const state = await readSlackDigestState();
+      const latestDue = new Date(now);
+      const daysSinceMonday = (now.getUTCDay() - 1 + 7) % 7;
+      latestDue.setUTCDate(now.getUTCDate() - daysSinceMonday);
+      latestDue.setUTCHours(14, 0, 0, 0);
+      if (latestDue.getTime() > now.getTime()) {
+        latestDue.setUTCDate(latestDue.getUTCDate() - 7);
+      }
+      if (
+        !state.lastSentAt ||
+        Date.parse(state.lastSentAt) < latestDue.getTime()
+      ) {
+        await deliverWeeklySlackDigest();
+      }
+    });
   setTimeout(() => {
     void sendIfDue().catch((error: unknown) => {
       process.stderr.write(
@@ -3096,7 +3519,7 @@ function scheduleWeeklySlackDigest(): void {
     next.setUTCDate(now.getUTCDate() + daysUntilMonday);
     next.setUTCHours(14, 0, 0, 0);
     setTimeout(() => {
-      void deliverWeeklySlackDigest()
+      void runWithDataProfile(profile, deliverWeeklySlackDigest)
         .catch((error: unknown) => {
           process.stderr.write(
             `Weekly Slack digest failed: ${error instanceof Error ? error.message : String(error)}\n`,
@@ -3109,11 +3532,21 @@ function scheduleWeeklySlackDigest(): void {
 }
 
 const server = createServer((req, res) => {
-  void handler(req, res).catch((error) => {
-    json(res, 500, {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  });
+  const url = new URL(
+    req.url ?? "/",
+    `http://${req.headers.host ?? "localhost"}`,
+  );
+  const requestedProfile = url.searchParams.get("profile")?.toLowerCase();
+  const profile =
+    (requestedProfile && dataProfileById.get(requestedProfile)) ||
+    dataProfiles[0]!;
+  void runWithDataProfile(profile, () =>
+    handler(req, res).catch((error) => {
+      json(res, 500, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }),
+  );
 });
 
 await mkdir(dataDirectory, { recursive: true });

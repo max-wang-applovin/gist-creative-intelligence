@@ -1,3 +1,5 @@
+import { activeMetaAdAccountId } from "../bot/lib/data-profile.js";
+
 export type AdManageAsset = {
   adId: string;
   thumbnailUrl: string | null;
@@ -11,7 +13,7 @@ export async function fetchAdManageAssets(range: {
   until: string;
 }): Promise<Record<string, AdManageAsset>> {
   const apiKey = process.env.ADMANAGE_API_KEY?.trim();
-  const rawAccount = process.env.META_AD_ACCOUNT_ID?.trim();
+  const rawAccount = activeMetaAdAccountId();
   if (!apiKey || !rawAccount) return {};
   const accountId = rawAccount.startsWith("act_")
     ? rawAccount

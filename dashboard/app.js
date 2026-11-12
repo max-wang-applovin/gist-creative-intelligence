@@ -48,9 +48,37 @@ const state = {
   upstreamHealth: null,
   experimentCreativeIds: new Set(),
   slackDigest: null,
+  targets: [],
+  decisions: [],
+  weeklyBriefs: [],
+  profiles: [],
+  profileAbortController: new AbortController(),
+  activeProfile:
+    new URLSearchParams(window.location.search).get("profile") || "default",
 };
 
 const $ = (id) => document.getElementById(id);
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  const raw =
+    typeof input === "string" || input instanceof URL
+      ? String(input)
+      : input.url;
+  const url = new URL(raw, window.location.origin);
+  if (
+    url.origin === window.location.origin &&
+    url.pathname.startsWith("/api/")
+  ) {
+    if (!url.searchParams.has("profile")) {
+      url.searchParams.set("profile", state.activeProfile);
+    }
+    return nativeFetch(url, {
+      ...init,
+      signal: init?.signal || state.profileAbortController.signal,
+    });
+  }
+  return nativeFetch(input, init);
+};
 const grid = $("creativeGrid");
 const loading = $("loading");
 const warning = $("warning");
@@ -126,6 +154,8 @@ function safeUrl(value) {
     return "";
   }
 }
+
+const isAbortError = (error) => error?.name === "AbortError";
 
 function cardThumbnail(media) {
   return safeUrl(media?.cardThumbnailUrl || media?.thumbnailUrl);
@@ -546,6 +576,121 @@ function currentLibraryUrl() {
   return `/?${params.toString()}`;
 }
 
+async function loadDashboardConfig() {
+  const response = await nativeFetch("/api/config");
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Configuration unavailable");
+  state.profiles = data.profiles || [];
+  const requestedProfile = new URLSearchParams(window.location.search).get(
+    "profile",
+  );
+  state.activeProfile = state.profiles.some(
+    (profile) => profile.id === requestedProfile,
+  )
+    ? requestedProfile
+    : data.activeProfile || state.profiles[0]?.id || "default";
+  const targetsResponse = await fetch("/api/targets");
+  const targets = await targetsResponse.json();
+  if (!targetsResponse.ok) {
+    throw new Error(targets.error || "Could not load profile targets");
+  }
+  const select = $("dataProfile");
+  select.replaceChildren();
+  for (const profile of state.profiles) {
+    appendOption(
+      select,
+      profile.id,
+      `${profile.label}${profile.adjustAppName ? ` · ${profile.adjustAppName}` : ""}`,
+    );
+  }
+  select.value = state.activeProfile;
+  $("profileControl").classList.toggle(
+    "hidden",
+    state.profiles.length < 2,
+  );
+  state.targets = targets.targets || [];
+}
+
+function clearProfileScopedViews() {
+  $("summaryStrip").replaceChildren();
+  grid.replaceChildren();
+  loading.classList.remove("hidden");
+  warning.replaceChildren();
+  warning.classList.add("hidden");
+  $("dataHealthBanner").classList.add("hidden");
+  $("scanProgress").replaceChildren();
+  $("scanProgress").classList.add("hidden");
+  $("scanButton").disabled = false;
+  $("rescanButton").disabled = false;
+  $("applyDebrief").disabled = false;
+  $("refreshDebrief").disabled = false;
+  $("analysisCoverage").textContent = "Loading account data…";
+  $("analysisSummary").replaceChildren();
+  $("analysisOverview").classList.add("hidden");
+  $("analysisReportView").replaceChildren();
+  $("analysisReportView").classList.add("hidden");
+  $("debriefContent").classList.add("hidden");
+  $("debriefHeadline").replaceChildren();
+  $("debriefSummary").replaceChildren();
+  $("debriefWarning").classList.add("hidden");
+  $("debriefStatus").textContent = "Loading account data…";
+  $("freshness").textContent = "Switching account / app…";
+}
+
+async function changeDataProfile(profileId) {
+  if (profileId === state.activeProfile) return;
+  state.profileAbortController.abort();
+  clearProfileScopedViews();
+  if (state.dataPollTimer) clearTimeout(state.dataPollTimer);
+  if (state.mediaPollTimer) clearTimeout(state.mediaPollTimer);
+  if (state.debriefPollTimer) clearTimeout(state.debriefPollTimer);
+  if (state.fatigueTimer) clearTimeout(state.fatigueTimer);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  clearProfileScopedViews();
+  state.profileAbortController = new AbortController();
+  state.activeProfile = profileId;
+  const query = new URLSearchParams(window.location.search);
+  query.set("profile", profileId);
+  window.history.replaceState({}, "", `/?${query.toString()}`);
+  state.payload = null;
+  state.loading = false;
+  state.analysis = null;
+  state.videoMetrics = null;
+  state.fatigue = null;
+  state.debrief = null;
+  state.debriefLoading = false;
+  state.debriefComparison = null;
+  state.competitors = null;
+  state.mediaLoadedIds.clear();
+  state.mediaLoadingIds.clear();
+  state.mediaRequest += 1;
+  state.mediaAllLoaded = false;
+  state.experiments = [];
+  state.savedReports = [];
+  state.testBriefs = [];
+  state.targets = [];
+  state.decisions = [];
+  state.weeklyBriefs = [];
+  state.scanJob = null;
+  state.fatigueRequest += 1;
+  state.selected = null;
+  state.compareIds.clear();
+  state.detail = null;
+  state.debriefDetail = null;
+  state.debriefPreviewCache.clear();
+  state.expandedTestedGroups.clear();
+  state.expandedLineages.clear();
+  if (dialog.open) dialog.close();
+  clearExperimentForm();
+  clearTargetForm();
+  renderWorkspace();
+  renderTargets();
+  renderDecisionHistory();
+  renderWeeklyBriefArchive();
+  await loadWorkspace();
+  await switchPage(state.page);
+}
+
 async function saveCurrentView() {
   const name = window.prompt("Name this report view:");
   if (!name?.trim()) return;
@@ -625,29 +770,120 @@ function renderSlackDigest() {
   $("sendSlackDigest").disabled = !configured;
 }
 
+function renderTargets() {
+  $("targetList").innerHTML =
+    state.targets
+      .map(
+        (target) => `<div class="workspace-item">
+          <div><strong>${escapeHtml(target.dimension)} · ${escapeHtml(target.segment)}</strong><small>CPI ${target.cpi == null ? "—" : money(target.cpi)} · CPSU ${target.cpsu == null ? "—" : money(target.cpsu)} · D1 ${target.d1 == null ? "—" : pct(target.d1)} · D3 ${target.d3 == null ? "—" : pct(target.d3)} · D7 ${target.d7 == null ? "—" : pct(target.d7)}</small></div>
+          <div><button data-edit-target="${escapeHtml(target.id)}">Edit</button><button data-delete-target="${escapeHtml(target.id)}">Delete</button></div>
+        </div>`,
+      )
+      .join("") ||
+    '<div class="analysis-empty">No configured targets; relative account benchmarks are active.</div>';
+}
+
+function renderDecisionHistory() {
+  $("decisionHistory").innerHTML =
+    state.decisions.length > 0
+      ? `<div class="data-table-wrap"><table class="analysis-data-table"><thead><tr><th>When</th><th>Creative</th><th>Decision</th><th>Owner</th><th>Reason</th><th>Source</th></tr></thead><tbody>${state.decisions
+          .slice(0, 100)
+          .map(
+            (decision) => `<tr>
+              <td>${new Date(decision.createdAt).toLocaleString()}</td>
+              <td>${escapeHtml(decision.creativeName)}</td>
+              <td><span class="budget-action ${decision.decision.toLowerCase()}">${escapeHtml(decision.decision)}</span></td>
+              <td>${escapeHtml(decision.owner || "—")}</td>
+              <td>${escapeHtml(decision.reason || "—")}</td>
+              <td>${escapeHtml(decision.source)}</td>
+            </tr>`,
+          )
+          .join("")}</tbody></table></div>`
+      : '<div class="analysis-empty">No recorded creative decisions yet.</div>';
+}
+
+function renderWeeklyBriefArchive() {
+  $("weeklyBriefArchive").innerHTML =
+    state.weeklyBriefs
+      .map(
+        (brief) => `<div class="workspace-item">
+          <div><strong>${escapeHtml(brief.title)}</strong><small>${escapeHtml(brief.range.since)} → ${escapeHtml(brief.range.until)} · ${money(brief.metrics.spend, true)} spend · ${integer(brief.metrics.scaleOpportunities)} scale · ${brief.metrics.fatiguing == null ? "—" : integer(brief.metrics.fatiguing)} fatiguing</small></div>
+          <button data-delete-weekly-brief="${escapeHtml(brief.id)}">Delete</button>
+        </div>`,
+      )
+      .join("") ||
+    '<div class="analysis-empty">No archived briefs yet.</div>';
+}
+
 async function loadWorkspace() {
   const [
     reportsResponse,
     briefsResponse,
     experimentsResponse,
     digestResponse,
+    targetsResponse,
+    decisionsResponse,
+    weeklyBriefsResponse,
   ] =
     await Promise.all([
       fetch("/api/saved-reports"),
       fetch("/api/test-briefs"),
       fetch("/api/experiments"),
       fetch("/api/slack-digest"),
+      fetch("/api/targets"),
+      fetch("/api/decisions"),
+      fetch("/api/weekly-briefs"),
     ]);
   const reports = await reportsResponse.json();
   const briefs = await briefsResponse.json();
   const experiments = await experimentsResponse.json();
   const digest = await digestResponse.json();
+  const targets = await targetsResponse.json();
+  const decisions = await decisionsResponse.json();
+  const weeklyBriefs = await weeklyBriefsResponse.json();
   state.savedReports = reports.reports || [];
   state.testBriefs = briefs.briefs || [];
   state.experiments = experiments.experiments || [];
   state.slackDigest = digest;
+  state.targets = targets.targets || [];
+  state.decisions = decisions.decisions || [];
+  state.weeklyBriefs = weeklyBriefs.briefs || [];
   renderWorkspace();
   renderSlackDigest();
+  renderTargets();
+  renderDecisionHistory();
+  renderWeeklyBriefArchive();
+}
+
+function clearTargetForm() {
+  $("targetForm").reset();
+  $("targetId").value = "";
+  $("targetDimension").value = "Global";
+  $("targetSegment").value = "All";
+  $("targetSegment").disabled = true;
+}
+
+async function saveTarget(event) {
+  event.preventDefault();
+  const response = await fetch("/api/targets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: $("targetId").value || undefined,
+      dimension: $("targetDimension").value,
+      segment: $("targetSegment").value,
+      cpi: $("targetCpi").value,
+      cpsu: $("targetCpsu").value,
+      d1: $("targetD1").value,
+      d3: $("targetD3").value,
+      d7: $("targetD7").value,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Could not save target");
+  clearTargetForm();
+  await loadWorkspace();
+  if (state.analysis) renderAnalysis();
 }
 
 const experimentCreativeId = (creative) =>
@@ -731,6 +967,42 @@ function renderExperimentCreativePicker() {
       : "");
 }
 
+function configuredTargetForSegments(segments) {
+  const target = {
+    cpi: null,
+    cpsu: null,
+    d1: null,
+    d3: null,
+    d7: null,
+    sources: { cpi: null, cpsu: null, d1: null, d3: null, d7: null },
+  };
+  const apply = (configured) => {
+    if (!configured) return;
+    const source =
+      configured.dimension === "Global"
+        ? "global target"
+        : `${configured.dimension}: ${configured.segment}`;
+    for (const metric of ["cpi", "cpsu", "d1", "d3", "d7"]) {
+      if (configured[metric] != null && configured[metric] > 0) {
+        target[metric] = configured[metric];
+        target.sources[metric] = source;
+      }
+    }
+  };
+  apply(state.targets.find((item) => item.dimension === "Global"));
+  for (const dimension of ["OS", "Source", "Format"]) {
+    apply(
+      state.targets.find(
+        (item) =>
+          item.dimension === dimension &&
+          item.segment.toLowerCase() ===
+            String(segments[dimension]).toLowerCase(),
+      ),
+    );
+  }
+  return target;
+}
+
 function experimentOutcome(experiment) {
   const ids = new Set(experiment.creativeIds || []);
   const linked = (state.debrief?.all || []).filter((creative) =>
@@ -775,11 +1047,33 @@ function experimentOutcome(experiment) {
           : "Learning";
   const cpsu = signups > 0 ? spend / signups : null;
   const d7 = d7Cohort > 0 ? (retainedD7 / d7Cohort) * 100 : null;
+  const cpsuComparisons = linked.flatMap((creative) => {
+    const target = configuredTargetForSegments({
+      OS: creative.os,
+      Source: creative.source,
+      Format: creative.format,
+    }).cpsu;
+    const value = creative.testing?.cpsu;
+    if (target == null || target <= 0) return [];
+    if (value != null) return [{ target, passes: value <= target }];
+    return Number(creative.testing?.spend || 0) > 0
+      ? [{ target, passes: false }]
+      : [];
+  });
+  const targetValues = new Set(cpsuComparisons.map((item) => item.target));
+  const cpsuComparison =
+    cpsuComparisons.length > 0
+      ? targetValues.size === 1 &&
+        cpsu !== null &&
+        cpsuComparisons.length === linked.length
+        ? ` vs ${money(cpsuComparisons[0].target)} target (${cpsu <= cpsuComparisons[0].target ? "passes" : "misses"})`
+        : ` · ${cpsuComparisons.filter((item) => item.passes).length}/${cpsuComparisons.length} targeted creatives pass scoped CPSU targets`
+      : "";
   return {
     label,
     detail:
       `${linked.length}/${ids.size} creatives · ${money(spend, true)} · ` +
-      `CPSU ${cpsu === null ? "—" : money(cpsu)} · D7 ${d7 === null ? "—" : pct(d7)}`,
+      `CPSU ${cpsu === null ? "—" : money(cpsu)}${cpsuComparison} · D7 ${d7 === null ? "—" : pct(d7)}`,
     tone: label.toLowerCase(),
   };
 }
@@ -1117,6 +1411,7 @@ async function loadMetaPreview(frame, adId) {
     if (!src) throw new Error("Unsafe preview URL");
     frame.innerHTML = `<iframe src="${escapeHtml(src)}" allow="autoplay; fullscreen" title="Meta ad preview"></iframe>`;
   } catch (error) {
+    if (isAbortError(error)) return;
     frame.innerHTML = `<div class="media-empty">${escapeHtml(error.message)}</div>`;
   }
 }
@@ -1663,6 +1958,7 @@ function currentRangeParams(force = false) {
   } else {
     params.set("days", preset);
   }
+  params.set("profile", state.activeProfile);
   if (force) params.set("refresh", "1");
   return params;
 }
@@ -1812,6 +2108,7 @@ async function loadSlice(dimension, params = currentRangeParams()) {
     populateSliceControl(dimension);
     if (state.detail?.tab === "insights") renderDetail();
   } catch (error) {
+    if (isAbortError(error)) return;
     warning.textContent = `${warning.textContent || ""} Slice filters unavailable: ${error.message}`.trim();
     warning.classList.remove("hidden");
   } finally {
@@ -1938,6 +2235,13 @@ async function loadMedia(
       renderLibraryFreshness();
       render();
       if (state.analysis) renderAnalysis();
+      if (
+        state.page === "analysis" &&
+        state.analysis &&
+        !state.analysis.coverage?.fingerprintsValidated
+      ) {
+        void loadAnalysis();
+      }
       if (state.detail) renderDetail();
     }
     warning.textContent = state.payload.warnings.join(" ");
@@ -1963,7 +2267,7 @@ async function loadMedia(
       );
     }
   } catch (error) {
-    if (requestId !== state.mediaRequest) return;
+    if (requestId !== state.mediaRequest || isAbortError(error)) return;
     warning.textContent =
       `${warning.textContent || ""} Preview enrichment unavailable: ${error.message}`.trim();
     warning.classList.remove("hidden");
@@ -2113,7 +2417,7 @@ async function loadData(force = false) {
       void loadAnalysis();
       void loadVideoMetrics(params);
       if (
-        ["copy", "landing"].includes(
+        ["copy", "landing", "budget", "brief"].includes(
           state.analysisReport,
         )
       ) {
@@ -2122,6 +2426,7 @@ async function loadData(force = false) {
       if (state.analysisReport === "fatigue") void loadFatigue(params);
     }
   } catch (error) {
+    if (isAbortError(error)) return;
     warning.textContent = error.message;
     warning.classList.remove("hidden");
     grid.innerHTML = '<div class="empty-state">Could not load dashboard data.</div>';
@@ -2154,6 +2459,7 @@ async function loadVideoMetrics(params = currentRangeParams()) {
     }
     if (state.detail?.tab === "performance") renderDetail();
   } catch (error) {
+    if (isAbortError(error)) return;
     console.warn(error.message);
   }
 }
@@ -2187,6 +2493,16 @@ function analysisBaselines(rows) {
     ctr:
       state.payload?.totals?.ctr ||
       numericMedian(rows.map((row) => row.metaCtr)),
+    d1: numericMedian(
+      rows
+        .filter((row) => row.adjustRetentionDenD1 >= 50)
+        .map((row) => row.adjustRetentionD1),
+    ),
+    d3: numericMedian(
+      rows
+        .filter((row) => row.adjustRetentionDenD3 >= 50)
+        .map((row) => row.adjustRetentionD3),
+    ),
     d7: numericMedian(
       rows
         .filter((row) => row.adjustRetentionDenD7 >= 50)
@@ -2398,6 +2714,32 @@ function metadataWinnerRecipe(rows) {
     .join("")}</div>`;
 }
 
+function rowTargetSegments(row) {
+  const metadata = creativeMetadata(row);
+  const campaignText = [
+    row.creativeName,
+    ...(row.metaCreativeNames || []),
+    ...(row.media || []).flatMap((media) => [
+      media.campaignName,
+      media.adSetName,
+    ]),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/[_-]+/g, " ");
+  const ios = /\bios\b/i.test(campaignText);
+  const android = /\bandroid\b/i.test(campaignText);
+  return {
+    OS: ios && android ? "Both" : ios ? "iOS" : android ? "Android" : "Unknown",
+    Source: metadata.source,
+    Format: metadata.mediaType,
+  };
+}
+
+function performanceTargetFor(row) {
+  return configuredTargetForSegments(rowTargetSegments(row));
+}
+
 function budgetRecommendations(rows) {
   const baselines = analysisBaselines(rows);
   return rows
@@ -2405,45 +2747,121 @@ function budgetRecommendations(rows) {
     .map((row) => {
       const cpiIndex =
         baselines.cpi > 0 ? row.cpi / baselines.cpi : 1;
-      const d7Ready = row.adjustRetentionDenD7 >= 50;
-      const d7Index =
-        d7Ready && baselines.d7 > 0
-          ? row.adjustRetentionD7 / baselines.d7
+      const target = performanceTargetFor(row);
+      const configuredRetentionSignal = [
+        {
+          horizon: "D7",
+          value: row.adjustRetentionD7,
+          cohort: row.adjustRetentionDenD7,
+          target: target.d7,
+          baseline: baselines.d7,
+        },
+        {
+          horizon: "D3",
+          value: row.adjustRetentionD3,
+          cohort: row.adjustRetentionDenD3,
+          target: target.d3,
+          baseline: baselines.d3,
+        },
+        {
+          horizon: "D1",
+          value: row.adjustRetentionD1,
+          cohort: row.adjustRetentionDenD1,
+          target: target.d1,
+          baseline: baselines.d1,
+        },
+      ].find(
+        (signal) =>
+          signal.cohort >= 50 &&
+          signal.target != null,
+      );
+      const retentionSignal =
+        configuredRetentionSignal ||
+        (row.adjustRetentionDenD7 >= 50 && baselines.d7 > 0
+          ? {
+              horizon: "D7",
+              value: row.adjustRetentionD7,
+              cohort: row.adjustRetentionDenD7,
+              target: null,
+              baseline: baselines.d7,
+            }
+          : null);
+      const retentionBenchmark =
+        retentionSignal?.target ?? retentionSignal?.baseline ?? null;
+      const retentionIndex =
+        retentionSignal && retentionBenchmark > 0
+          ? retentionSignal.value / retentionBenchmark
           : null;
-      const increase = cpiIndex <= 0.85 && d7Index != null && d7Index >= 1;
-      const retentionOverride = d7Index != null && d7Index >= 1.15;
+      const cpiPass =
+        target.cpi != null ? row.cpi <= target.cpi : cpiIndex <= 0.85;
+      const cpiDecisionIndex =
+        target.cpi != null && target.cpi > 0
+          ? row.cpi / target.cpi
+          : cpiIndex;
+      const retentionPass =
+        retentionIndex != null && retentionIndex >= 1;
+      const cpiMiss =
+        target.cpi != null
+          ? row.cpi >= target.cpi * 1.25
+          : cpiIndex >= 1.25;
+      const retentionMiss =
+        retentionIndex != null && retentionIndex <= 0.8;
+      const increase = cpiPass && retentionPass;
+      const retentionOverride =
+        retentionIndex != null && retentionIndex >= 1.15;
       const reduce =
-        (cpiIndex >= 1.25 && !retentionOverride) ||
-        (d7Index != null && d7Index <= 0.8);
+        (cpiMiss && !retentionOverride) || retentionMiss;
       const action = increase ? "Increase" : reduce ? "Reduce" : "Hold";
       const suggestedChange = increase
-        ? cpiIndex <= 0.7 && d7Index >= 1.15
+        ? cpiDecisionIndex <= 0.7 && retentionIndex >= 1.15
           ? 20
           : 10
         : reduce
-          ? (cpiIndex >= 1.5 && !retentionOverride) ||
-            (d7Index != null && d7Index <= 0.65)
+          ? (cpiDecisionIndex >= 1.5 && !retentionOverride) ||
+            (retentionIndex != null && retentionIndex <= 0.65)
             ? -20
             : -10
           : 0;
       const reasons = [];
-      if (cpiIndex <= 0.85) {
+      if (target.cpi != null) {
+        reasons.push(
+          `CPI ${money(row.cpi)} vs ${money(target.cpi)} target`,
+        );
+      } else if (cpiIndex <= 0.85) {
         reasons.push(`${Math.round((1 - cpiIndex) * 100)}% cheaper CPI`);
       } else if (cpiIndex >= 1.25) {
         reasons.push(`${Math.round((cpiIndex - 1) * 100)}% higher CPI`);
       }
-      if (d7Index === 1) {
-        reasons.push("D7 at peer median");
-      } else if (d7Index != null && d7Index > 1) {
+      const retentionReference = configuredRetentionSignal
+        ? "target"
+        : "peer median";
+      if (retentionIndex === 1) {
         reasons.push(
-          `${Math.round((d7Index - 1) * 100)}% above peer-median D7`,
+          `${retentionSignal.horizon} at ${retentionReference}`,
         );
-      } else if (d7Index != null && d7Index < 1) {
+      } else if (retentionIndex != null && retentionIndex > 1) {
         reasons.push(
-          `${Math.round((1 - d7Index) * 100)}% below peer-median D7`,
+          `${Math.round((retentionIndex - 1) * 100)}% above ${retentionSignal.horizon} ${retentionReference}`,
+        );
+      } else if (retentionIndex != null && retentionIndex < 1) {
+        reasons.push(
+          `${Math.round((1 - retentionIndex) * 100)}% below ${retentionSignal.horizon} ${retentionReference}`,
         );
       } else {
-        reasons.push("D7 cohort still maturing");
+        reasons.push("Retention cohorts still maturing");
+      }
+      const targetSources = new Set(
+        [
+          target.cpi != null ? target.sources.cpi : null,
+          configuredRetentionSignal
+            ? target.sources[
+                configuredRetentionSignal.horizon.toLowerCase()
+              ]
+            : null,
+        ].filter(Boolean),
+      );
+      if (targetSources.size > 0) {
+        reasons.push(`Target source: ${[...targetSources].join(" + ")}`);
       }
       return {
         row,
@@ -2451,7 +2869,8 @@ function budgetRecommendations(rows) {
         suggestedChange,
         reason: reasons.join(" · "),
         cpiIndex,
-        d7Index,
+        d7Index: retentionIndex,
+        target,
       };
     })
     .sort(
@@ -2687,6 +3106,7 @@ async function loadCompetitors(force = false) {
     }
     renderCompetitors();
   } catch (error) {
+    if (isAbortError(error)) return;
     $("competitorDisclosure").textContent = error.message;
     $("inspirationQueries").innerHTML =
       '<div class="analysis-empty">Competitor feed unavailable.</div>';
@@ -2808,8 +3228,18 @@ function attachReportCardClicks() {
   $("analysisReportView")
     .querySelectorAll("[data-analysis-creative]")
     .forEach((item) => {
-      item.addEventListener("click", () =>
-        void openDetail(item.dataset.analysisCreative),
+      item.addEventListener("click", (event) => {
+        if (event.target.closest("button")) return;
+        void openDetail(item.dataset.analysisCreative);
+      });
+    });
+  $("analysisReportView")
+    .querySelectorAll("[data-record-budget-decision]")
+    .forEach((button) => {
+      button.addEventListener("click", () =>
+        void recordBudgetDecision(
+          button.dataset.recordBudgetDecision,
+        ).catch((error) => window.alert(error.message)),
       );
     });
 }
@@ -3086,6 +3516,14 @@ function renderFatigueReport() {
 }
 
 function renderBudgetReport(rows) {
+  if (!state.mediaAllLoaded) {
+    return (
+      reportHeader(
+        "Budget Opportunities",
+        "Loading complete creative metadata for segment targets…",
+      ) + '<div class="analysis-empty">Loading all creative media…</div>'
+    );
+  }
   const recommendations = budgetRecommendations(rows);
   const counts = {
     Increase: recommendations.filter((item) => item.action === "Increase")
@@ -3096,7 +3534,7 @@ function renderBudgetReport(rows) {
   return (
     reportHeader(
       "Budget Opportunities",
-      "Read-only recommendations using CPI versus the selected-window account average and mature D7 versus the creative benchmark. Apply changes gradually and preserve test controls.",
+      "Read-only recommendations use configured segment targets when available, then account CPI and mature D7 benchmarks. Retention falls back from D7 to configured D3/D1 when later cohorts are not ready.",
     ) +
     `<div class="fatigue-summary budget-summary">
       <div><span>Increase</span><strong>${integer(counts.Increase)}</strong></div>
@@ -3105,7 +3543,7 @@ function renderBudgetReport(rows) {
       <div><span>Evaluated</span><strong>${integer(recommendations.length)}</strong></div>
     </div>
     <div class="data-table-wrap"><table class="analysis-data-table budget-table">
-      <thead><tr><th class="sticky-cell">Creative</th><th>Recommendation</th><th>Suggested change</th><th>Spend</th><th>CPI</th><th>D7</th><th>Mature D7 N</th><th>Why</th></tr></thead>
+      <thead><tr><th class="sticky-cell">Creative</th><th>Recommendation</th><th>Suggested change</th><th>Spend</th><th>CPI</th><th>D7</th><th>Mature D7 N</th><th>Why</th><th></th></tr></thead>
       <tbody>${recommendations
         .slice(0, 150)
         .map(
@@ -3118,6 +3556,7 @@ function renderBudgetReport(rows) {
             <td>${retentionPct(row.adjustRetentionD7, row.adjustRetentionDenD7)}</td>
             <td>${integer(row.adjustRetentionDenD7)}</td>
             <td>${escapeHtml(reason)}</td>
+            <td><button data-record-budget-decision="${escapeHtml(row.creativeId)}">Record</button></td>
           </tr>`,
         )
         .join("")}</tbody>
@@ -3125,7 +3564,56 @@ function renderBudgetReport(rows) {
   );
 }
 
+async function recordBudgetDecision(creativeId) {
+  const recommendation = budgetRecommendations(
+    state.payload?.creatives || [],
+  ).find((item) => item.row.creativeId === creativeId);
+  if (!recommendation) return;
+  const owner = window.prompt("Decision owner (optional):", "") ?? "";
+  const reason = window.prompt(
+    "Decision reason:",
+    recommendation.reason,
+  );
+  if (!reason?.trim()) return;
+  const row = recommendation.row;
+  const response = await fetch("/api/decisions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      creativeId: row.creativeId,
+      creativeName: row.creativeName,
+      decision: recommendation.action,
+      reason: reason.trim(),
+      owner: owner.trim(),
+      source: "Budget Opportunities",
+      metrics: {
+        spend: row.metaSpend,
+        cpi: row.cpi,
+        ctr: row.metaCtr,
+        d1: row.adjustRetentionD1,
+        d3: row.adjustRetentionD3,
+        d7: row.adjustRetentionD7,
+        d7Cohort: row.adjustRetentionDenD7,
+      },
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || "Could not record decision");
+  }
+  state.decisions = [data.decision, ...state.decisions];
+  window.alert("Decision recorded in Workspace.");
+}
+
 function renderWeeklyBrief(rows) {
+  if (!state.mediaAllLoaded) {
+    return (
+      reportHeader(
+        "Weekly Creative Brief",
+        "Loading complete creative metadata for target-aware recommendations…",
+      ) + '<div class="analysis-empty">Preparing Weekly Brief…</div>'
+    );
+  }
   const baselines = analysisBaselines(rows);
   const recommendations = budgetRecommendations(rows);
   const allScale = recommendations.filter(
@@ -3157,7 +3645,7 @@ function renderWeeklyBrief(rows) {
   return `<div class="weekly-brief">
     <header>
       <div><p class="eyebrow">CREATIVE INTELLIGENCE</p><h2>Weekly Creative Brief</h2><span>${state.payload.range.since} → ${state.payload.range.until} · generated ${new Date().toLocaleString()}</span></div>
-      <button id="printWeeklyBrief" class="analysis-primary" type="button">Print / Save PDF${!state.fatigue && !state.fatigueError ? " · fatigue pending" : ""}</button>
+      <div class="experiment-actions"><button id="archiveWeeklyBrief" class="analysis-secondary" type="button">Archive brief</button><button id="printWeeklyBrief" class="analysis-primary" type="button">Print / Save PDF${!state.fatigue && !state.fatigueError ? " · fatigue pending" : ""}</button></div>
     </header>
     <div class="weekly-brief-kpis">
       <div><span>Spend</span><strong>${money(state.payload.totals.spend, true)}</strong></div>
@@ -3175,6 +3663,60 @@ function renderWeeklyBrief(rows) {
     </div>
     <footer>Recommendations are directional and read-only. Validate budget changes against campaign constraints and experiment controls.</footer>
   </div>`;
+}
+
+async function archiveCurrentWeeklyBrief() {
+  const rows = state.payload?.creatives || [];
+  if (!state.payload || !rows.length) return;
+  const recommendations = budgetRecommendations(rows);
+  const working = [...rows]
+    .filter((row) => row.metaSpend >= 1_000)
+    .sort((a, b) => creativeScore(b) - creativeScore(a))
+    .slice(0, 5);
+  const increase = recommendations
+    .filter((item) => item.action === "Increase");
+  const reduce = recommendations
+    .filter((item) => item.action === "Reduce");
+  const fatigue = (state.fatigue?.creatives || [])
+    .filter((item) => item.status === "Fatiguing");
+  const response = await fetch("/api/weekly-briefs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: `Weekly Creative Brief · ${state.payload.range.until}`,
+      range: state.payload.range,
+      metrics: {
+        spend: state.payload.totals.spend,
+        installs: state.payload.totals.installs,
+        cpi: state.payload.totals.cpi,
+        d7Ready: rows.filter(
+          (row) => row.adjustRetentionDenD7 >= 50,
+        ).length,
+        scaleOpportunities: increase.length,
+        fatiguing: state.fatigue?.summary.fatiguing ?? null,
+      },
+      highlights: {
+        working: working.map(
+          (row) => `${row.creativeName} · ${money(row.cpi)} CPI`,
+        ),
+        increase: increase
+          .slice(0, 5)
+          .map((item) => `${item.row.creativeName} · ${item.reason}`),
+        reduce: reduce
+          .slice(0, 5)
+          .map((item) => `${item.row.creativeName} · ${item.reason}`),
+        fatigue: fatigue
+          .slice(0, 5)
+          .map((item) => `${item.creativeName} · ${item.reasons.join(" · ")}`),
+      },
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || "Could not archive brief");
+  }
+  state.weeklyBriefs = [data.brief, ...state.weeklyBriefs];
+  $("archiveWeeklyBrief").textContent = "Archived";
 }
 
 function renderLandingReport(rows) {
@@ -3312,13 +3854,18 @@ function renderAnalysisReport() {
     );
     window.print();
   });
+  $("archiveWeeklyBrief")?.addEventListener("click", () =>
+    void archiveCurrentWeeklyBrief().catch((error) =>
+      window.alert(error.message),
+    ),
+  );
 }
 
 function setAnalysisReport(report) {
   state.analysisReport = report;
   renderAnalysisReport();
   if (
-    ["copy", "landing"].includes(report) &&
+    ["copy", "landing", "budget", "brief"].includes(report) &&
     !state.mediaAllLoaded
   ) {
     void loadAllMedia();
@@ -3401,6 +3948,21 @@ function renderAnalysis() {
     <div class="analysis-kpi"><span>Account spend</span><strong>${money(state.payload.totals.spend, true)}</strong><p>${state.payload.range.since} → ${state.payload.range.until}</p></div>
     <div class="analysis-kpi"><span>Meta hook rate</span><strong>${hookRate == null ? "—" : pct(hookRate)}</strong><p>3-second views / impressions</p></div>
     <div class="analysis-kpi"><span>Top 3 concentration</span><strong>${((top3Spend / totalSpend) * 100).toFixed(0)}%</strong><p>Share of account spend</p></div>`;
+  const scanQueue = state.analysis.scanQueue || [];
+  $("scanPriority").innerHTML = scanQueue.length
+    ? `<table class="analysis-data-table"><thead><tr><th>#</th><th class="sticky-cell">Creative</th><th>Status</th><th>Spend</th><th>CPI</th><th>D7</th></tr></thead><tbody>${scanQueue
+        .map(
+          (item, index) => `<tr data-analysis-creative="${escapeHtml(item.creativeId)}">
+            <td>${index + 1}</td>
+            <td class="sticky-cell">${escapeHtml(item.creativeName)}</td>
+            <td>${escapeHtml(item.status)}</td>
+            <td>${money(item.spend)}</td>
+            <td>${money(item.cpi)}</td>
+            <td>${item.d7 == null ? "—" : pct(item.d7)}</td>
+          </tr>`,
+        )
+        .join("")}</tbody></table>`
+    : '<div class="analysis-empty">All creatives in this window are scanned and current.</div>';
   if (
     !state.fatigue &&
     !state.fatigueError &&
@@ -3492,6 +4054,7 @@ async function loadAnalysis() {
     state.analysis = data;
     renderAnalysis();
   } catch (error) {
+    if (isAbortError(error)) return;
     $("analysisCoverage").textContent = error.message;
   }
 }
@@ -3521,7 +4084,7 @@ async function loadFatigue(params = currentRangeParams()) {
       renderAnalysisReport();
     }
   } catch (error) {
-    if (requestId !== state.fatigueRequest) return;
+    if (requestId !== state.fatigueRequest || isAbortError(error)) return;
     state.fatigueError = error.message;
     if (state.analysis) renderAnalysis();
     else if (["fatigue", "brief"].includes(state.analysisReport)) {
@@ -4935,6 +5498,7 @@ async function loadDebriefComparison() {
     state.debriefComparison = data;
     renderDebriefComparison();
   } catch (error) {
+    if (isAbortError(error)) return;
     $("debriefPeriodComparison").innerHTML =
       `<span>${escapeHtml(error.message)}</span>`;
   }
@@ -5063,6 +5627,7 @@ async function loadDebrief(force = false) {
       scheduleDebriefPoll(data.generatedAt);
     }
   } catch (error) {
+    if (isAbortError(error)) return;
     $("debriefStatus").textContent = error.message;
     $("debriefWarning").textContent = error.message;
     $("debriefWarning").classList.remove("hidden");
@@ -5146,7 +5711,7 @@ async function switchPage(page) {
       void loadAnalysis();
       void loadMedia();
       if (
-        ["copy", "landing"].includes(
+        ["copy", "landing", "budget", "brief"].includes(
           state.analysisReport,
         )
       ) {
@@ -5163,6 +5728,7 @@ async function switchPage(page) {
 }
 
 async function startScan(force) {
+  const profileId = state.activeProfile;
   const scanButton = $("scanButton");
   const rescanButton = $("rescanButton");
   scanButton.disabled = true;
@@ -5184,21 +5750,24 @@ async function startScan(force) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Could not start scan");
     state.scanJob = data.job;
-    pollScan(data.job.id);
+    pollScan(data.job.id, profileId);
   } catch (error) {
+    if (profileId !== state.activeProfile || error.name === "AbortError") return;
     $("scanProgress").textContent = error.message;
     scanButton.disabled = false;
     rescanButton.disabled = false;
   }
 }
 
-async function pollScan(jobId) {
+async function pollScan(jobId, profileId = state.activeProfile) {
+  if (profileId !== state.activeProfile) return;
   try {
     const response = await fetch(
       `/api/analysis/status?jobId=${encodeURIComponent(jobId)}`,
     );
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Scan status unavailable");
+    if (profileId !== state.activeProfile) return;
     const job = data.job;
     state.scanJob = job;
     const total = job.total || Number($("scanLimit").value);
@@ -5207,13 +5776,14 @@ async function pollScan(jobId) {
       (job.current ? ` · ${job.current}` : "") +
       (job.failed ? ` · ${job.failed} failed` : "");
     if (job.status === "queued" || job.status === "running") {
-      setTimeout(() => void pollScan(jobId), 1500);
+      setTimeout(() => void pollScan(jobId, profileId), 1500);
       return;
     }
     $("scanButton").disabled = false;
     $("rescanButton").disabled = false;
     await loadAnalysis();
   } catch (error) {
+    if (profileId !== state.activeProfile || error.name === "AbortError") return;
     $("scanProgress").textContent = error.message;
     $("scanButton").disabled = false;
     $("rescanButton").disabled = false;
@@ -5270,6 +5840,11 @@ $("datePreset").addEventListener("change", () => {
 });
 $("applyDates").addEventListener("click", () => void loadData());
 $("refreshButton").addEventListener("click", () => void loadData(true));
+$("dataProfile").addEventListener("change", (event) => {
+  void changeDataProfile(event.currentTarget.value).catch((error) =>
+    window.alert(error.message),
+  );
+});
 $("analysisDatePreset").addEventListener("change", () => {
   const custom = $("analysisDatePreset").value === "custom";
   $("analysisCustomDates").classList.toggle("hidden", !custom);
@@ -5368,6 +5943,46 @@ $("sendSlackDigest").addEventListener("click", () => {
       $("sendSlackDigest").disabled =
         !state.slackDigest?.config?.configured;
     });
+});
+$("targetDimension").addEventListener("change", () => {
+  const global = $("targetDimension").value === "Global";
+  $("targetSegment").disabled = global;
+  if (global) $("targetSegment").value = "All";
+  else if ($("targetSegment").value === "All") $("targetSegment").value = "";
+});
+$("targetForm").addEventListener("submit", (event) =>
+  void saveTarget(event).catch((error) => window.alert(error.message)),
+);
+$("targetList").addEventListener("click", (event) => {
+  const editId = event.target.closest("[data-edit-target]")?.dataset.editTarget;
+  if (editId) {
+    const target = state.targets.find((item) => item.id === editId);
+    if (!target) return;
+    $("targetId").value = target.id;
+    $("targetDimension").value = target.dimension;
+    $("targetSegment").value = target.segment;
+    $("targetSegment").disabled = target.dimension === "Global";
+    for (const metric of ["Cpi", "Cpsu", "D1", "D3", "D7"]) {
+      const key = metric.toLowerCase();
+      $(`target${metric}`).value = target[key] ?? "";
+    }
+    return;
+  }
+  const deleteId = event.target.closest("[data-delete-target]")?.dataset
+    .deleteTarget;
+  if (deleteId) {
+    void fetch(`/api/targets?id=${encodeURIComponent(deleteId)}`, {
+      method: "DELETE",
+    }).then(loadWorkspace);
+  }
+});
+$("weeklyBriefArchive").addEventListener("click", (event) => {
+  const id = event.target.closest("[data-delete-weekly-brief]")?.dataset
+    .deleteWeeklyBrief;
+  if (!id) return;
+  void fetch(`/api/weekly-briefs?id=${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  }).then(loadWorkspace);
 });
 $("workspaceDialog").addEventListener("click", (event) => {
   if (event.target === $("workspaceDialog")) {
@@ -5581,6 +6196,7 @@ $("debriefNextPage").addEventListener("click", () => {
   renderDebriefAll();
 });
 
+clearTargetForm();
 const initialQuery = new URLSearchParams(window.location.search);
 const initialPage = initialQuery.get("page");
 const initialReport = initialQuery.get("report");
@@ -5642,9 +6258,18 @@ if (
 ) {
   state.analysisReport = initialReport;
 }
-void switchPage(
-  ["library", "analysis", "inspiration", "debrief"].includes(initialPage)
-    ? initialPage
-    : "library",
-);
+async function initializeDashboard() {
+  try {
+    await loadDashboardConfig();
+  } catch (error) {
+    warning.textContent = error.message;
+    warning.classList.remove("hidden");
+  }
+  await switchPage(
+    ["library", "analysis", "inspiration", "debrief"].includes(initialPage)
+      ? initialPage
+      : "library",
+  );
+}
+void initializeDashboard();
 setInterval(renderLibraryFreshness, 30_000);

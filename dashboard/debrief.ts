@@ -17,16 +17,25 @@ import {
 import { join, resolve } from "node:path";
 import { defaultDateRange } from "../bot/lib/dates.js";
 import { normalizeCreativeName } from "../bot/lib/names.js";
+import {
+  activeMetaAdAccountId,
+  activeProfileId,
+  activeProfileUsesLegacyStorage,
+} from "../bot/lib/data-profile.js";
 import { runUpstreamTask } from "./upstream.js";
 
 export const DEFAULT_DEBRIEF_DAYS = 14 * 7;
 const MAX_DEBRIEF_DAYS = 180;
 const CACHE_TTL_MS = 30 * 60_000;
 const META_INVENTORY_TTL_MS = 6 * 60 * 60_000;
-const snapshotDirectory = resolve(
+const snapshotRootDirectory = resolve(
   process.env.DASHBOARD_DATA_DIR?.trim() || ".agent-serve",
   "debrief",
 );
+const snapshotDirectory = () =>
+  activeProfileUsesLegacyStorage()
+    ? snapshotRootDirectory
+    : join(snapshotRootDirectory, activeProfileId());
 
 /** Max's decision rule: decide at 7 days or $350, whichever comes first. */
 const DECISION_SPEND = 350;
@@ -336,7 +345,7 @@ const META_AD_STATUSES = [
 
 async function fetchMetaAdInventoryLive(): Promise<MetaAd[]> {
   const token = process.env.META_ACCESS_TOKEN?.trim();
-  const account = process.env.META_AD_ACCOUNT_ID?.trim();
+  const account = activeMetaAdAccountId();
   if (!token || !account) {
     throw new Error("META_ACCESS_TOKEN and META_AD_ACCOUNT_ID are required.");
   }
@@ -391,9 +400,10 @@ type MetaInventorySnapshot = {
   ads: MetaAd[];
 };
 
-let metaInventoryCache:
-  | { expiresAt: number; savedAt: string; ads: MetaAd[] }
-  | undefined;
+const metaInventoryCaches = new Map<
+  string,
+  { expiresAt: number; savedAt: string; ads: MetaAd[] }
+>();
 
 async function readMetaInventorySnapshot(): Promise<{
   savedAt: string;
@@ -401,7 +411,10 @@ async function readMetaInventorySnapshot(): Promise<{
 } | null> {
   try {
     const parsed = JSON.parse(
-      await readFile(join(snapshotDirectory, "meta-ad-inventory.json"), "utf8"),
+      await readFile(
+        join(snapshotDirectory(), "meta-ad-inventory.json"),
+        "utf8",
+      ),
     ) as MetaInventorySnapshot;
     if (
       parsed.version !== 1 ||
@@ -419,8 +432,8 @@ async function readMetaInventorySnapshot(): Promise<{
 async function writeMetaInventorySnapshot(
   ads: MetaAd[],
 ): Promise<string> {
-  await mkdir(snapshotDirectory, { recursive: true });
-  const path = join(snapshotDirectory, "meta-ad-inventory.json");
+  await mkdir(snapshotDirectory(), { recursive: true });
+  const path = join(snapshotDirectory(), "meta-ad-inventory.json");
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
   const savedAt = new Date().toISOString();
   const snapshot: MetaInventorySnapshot = {
@@ -439,21 +452,23 @@ async function fetchMetaAdInventory(): Promise<{
   ads: MetaAd[];
   warning: string | null;
 }> {
-  if (metaInventoryCache?.expiresAt && metaInventoryCache.expiresAt > Date.now()) {
-    return { ads: metaInventoryCache.ads, warning: null };
+  const profileId = activeProfileId();
+  const cached = metaInventoryCaches.get(profileId);
+  if (cached?.expiresAt && cached.expiresAt > Date.now()) {
+    return { ads: cached.ads, warning: null };
   }
   try {
     const ads = await fetchMetaAdInventoryLive();
     const savedAt = await writeMetaInventorySnapshot(ads);
-    metaInventoryCache = {
+    metaInventoryCaches.set(profileId, {
       ads,
       savedAt,
       expiresAt: Date.now() + META_INVENTORY_TTL_MS,
-    };
+    });
     return { ads, warning: null };
   } catch (error) {
     const stored =
-      metaInventoryCache ??
+      cached ??
       (await readMetaInventorySnapshot().then((snapshot) =>
         snapshot
           ? {
@@ -464,7 +479,7 @@ async function fetchMetaAdInventory(): Promise<{
           : undefined,
       ));
     if (stored?.ads.length) {
-      metaInventoryCache = stored;
+      metaInventoryCaches.set(profileId, stored);
       return {
         ads: stored.ads,
         warning:
@@ -481,16 +496,16 @@ async function fetchMetaAdInventory(): Promise<{
   }
 }
 
-const creativeMappingsPath = join(
-  snapshotDirectory,
-  "creative-mappings.json",
-);
-let creativeMappingWriteTail: Promise<void> = Promise.resolve();
+const creativeMappingsPath = () =>
+  join(snapshotDirectory(), "creative-mappings.json");
+const creativeMappingWriteTails = new Map<string, Promise<void>>();
 
-async function readCreativeMappings(): Promise<CreativeMapping[]> {
+async function readCreativeMappings(
+  path = creativeMappingsPath(),
+): Promise<CreativeMapping[]> {
   try {
     const parsed = JSON.parse(
-      await readFile(creativeMappingsPath, "utf8"),
+      await readFile(path, "utf8"),
     ) as { version: 1; mappings: CreativeMapping[] };
     return parsed.version === 1 && Array.isArray(parsed.mappings)
       ? parsed.mappings
@@ -500,35 +515,54 @@ async function readCreativeMappings(): Promise<CreativeMapping[]> {
   }
 }
 
-async function writeCreativeMappings(
-  mappings: CreativeMapping[],
-): Promise<void> {
-  creativeMappingWriteTail = creativeMappingWriteTail
+async function mutateCreativeMappings<T>(
+  mutation: (mappings: CreativeMapping[]) => {
+    mappings: CreativeMapping[];
+    value: T;
+    changed: boolean;
+  },
+): Promise<T> {
+  const profileId = activeProfileId();
+  const directory = snapshotDirectory();
+  const path = creativeMappingsPath();
+  const tail =
+    creativeMappingWriteTails.get(profileId) ?? Promise.resolve();
+  let result: T;
+  const next = tail
     .catch(() => undefined)
     .then(async () => {
-      await mkdir(snapshotDirectory, { recursive: true });
-      const temporary = `${creativeMappingsPath}.${process.pid}.${Date.now()}.tmp`;
+      const mappings = await readCreativeMappings(path);
+      const outcome = mutation(mappings);
+      result = outcome.value;
+      if (!outcome.changed) return;
+      await mkdir(directory, { recursive: true });
+      const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
       await writeFile(
         temporary,
-        `${JSON.stringify({ version: 1, mappings }, null, 2)}\n`,
+        `${JSON.stringify({ version: 1, mappings: outcome.mappings }, null, 2)}\n`,
         { mode: 0o600 },
       );
-      await rename(temporary, creativeMappingsPath);
+      await rename(temporary, path);
     });
-  return creativeMappingWriteTail;
+  creativeMappingWriteTails.set(profileId, next);
+  await next;
+  return result!;
 }
 
 async function invalidateDebriefSnapshots(): Promise<void> {
-  cache.clear();
+  const profilePrefix = `${activeProfileId()}:`;
+  for (const key of cache.keys()) {
+    if (key.startsWith(profilePrefix)) cache.delete(key);
+  }
   try {
-    const names = await readdir(snapshotDirectory);
+    const names = await readdir(snapshotDirectory());
     await Promise.all(
       names
         .filter((name) =>
           /^\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}\.json$/.test(name),
         )
         .map((name) =>
-          unlink(join(snapshotDirectory, name)).catch(() => undefined),
+          unlink(join(snapshotDirectory(), name)).catch(() => undefined),
         ),
     );
   } catch {
@@ -537,6 +571,9 @@ async function invalidateDebriefSnapshots(): Promise<void> {
 }
 
 export async function listCreativeMappings(): Promise<CreativeMapping[]> {
+  await creativeMappingWriteTails
+    .get(activeProfileId())
+    ?.catch(() => undefined);
   return readCreativeMappings();
 }
 
@@ -546,19 +583,22 @@ export async function upsertCreativeMapping(input: {
   metaAdId: string;
   metaAdName: string;
 }): Promise<CreativeMapping> {
-  const mappings = await readCreativeMappings();
   const value: CreativeMapping = {
     ...input,
     updatedAt: new Date().toISOString(),
   };
-  await writeCreativeMappings([
+  await mutateCreativeMappings((mappings) => ({
+    mappings: [
+      value,
+      ...mappings.filter(
+        (mapping) =>
+          mapping.adjustCreativeId !== input.adjustCreativeId &&
+          mapping.metaAdId !== input.metaAdId,
+      ),
+    ],
     value,
-    ...mappings.filter(
-      (mapping) =>
-        mapping.adjustCreativeId !== input.adjustCreativeId &&
-        mapping.metaAdId !== input.metaAdId,
-    ),
-  ]);
+    changed: true,
+  }));
   await invalidateDebriefSnapshots();
   return value;
 }
@@ -566,12 +606,17 @@ export async function upsertCreativeMapping(input: {
 export async function deleteCreativeMapping(
   adjustCreativeId: string,
 ): Promise<boolean> {
-  const mappings = await readCreativeMappings();
-  const next = mappings.filter(
-    (mapping) => mapping.adjustCreativeId !== adjustCreativeId,
-  );
-  if (next.length === mappings.length) return false;
-  await writeCreativeMappings(next);
+  const deleted = await mutateCreativeMappings((mappings) => {
+    const next = mappings.filter(
+      (mapping) => mapping.adjustCreativeId !== adjustCreativeId,
+    );
+    return {
+      mappings: next,
+      value: next.length !== mappings.length,
+      changed: next.length !== mappings.length,
+    };
+  });
+  if (!deleted) return false;
   await invalidateDebriefSnapshots();
   return true;
 }
@@ -1930,11 +1975,14 @@ type DebriefSnapshot = {
 };
 
 function debriefKey(range: { since: string; until: string }): string {
-  return `${range.since}:${range.until}`;
+  return `${activeProfileId()}:${range.since}:${range.until}`;
 }
 
 function snapshotPath(range: { since: string; until: string }): string {
-  return join(snapshotDirectory, `${range.since}_${range.until}.json`);
+  return join(
+    snapshotDirectory(),
+    `${range.since}_${range.until}.json`,
+  );
 }
 
 async function readSnapshot(range: {
@@ -1966,7 +2014,7 @@ async function writeSnapshot(
   range: { since: string; until: string },
   value: DebriefPayload,
 ): Promise<void> {
-  await mkdir(snapshotDirectory, { recursive: true });
+  await mkdir(snapshotDirectory(), { recursive: true });
   const path = snapshotPath(range);
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
   const snapshot: DebriefSnapshot = {

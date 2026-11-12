@@ -1,6 +1,8 @@
 # Creative Intelligence
 
-Read-only Meta Ads + Adjust creative intelligence dashboard with live creative previews, retention reporting, delivery slices, and AI analysis.
+Read-only Meta Ads + Adjust creative intelligence dashboard with live creative previews, retention reporting, delivery slices, AI analysis, configurable performance targets, decision history, and archived Weekly Briefs.
+
+An optional account/app selector isolates profiles, caches, scans, targets, decisions, and workspace state. The first configured profile retains existing single-account state.
 
 ## Render deployment
 
@@ -41,6 +43,7 @@ npm run dashboard
 | `META_AD_ACCOUNT_ID` | Ad account id (`act_…` or bare digits) |
 | `ADJUST_API_TOKEN` | Adjust Report Service bearer token |
 | `ADJUST_APP_NAME` | Optional app-name filter |
+| `DASHBOARD_PROFILES_JSON` | Optional JSON array of `{ id, label, metaAdAccountId, adjustAppName?, adjustAppToken? }` profiles. Each profile requires an Adjust app name or token; keep the legacy profile first. |
 | `OPENAI_API_KEY` | Enables vision-based creative scans |
 | `OPENAI_ANALYSIS_MODEL` | Scan model, default `gpt-4.1-mini` |
 | `ADMANAGE_API_KEY` | Read-only AdScan feed and direct video fallback |
