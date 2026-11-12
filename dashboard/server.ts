@@ -1,6 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchAdjustCreativePerformance } from "../bot/lib/adjust.js";
@@ -221,6 +228,10 @@ type MediaPayload = {
 };
 
 type CacheEntry = { expiresAt: number; value: DashboardPayload };
+const DASHBOARD_CACHE_TTL_MS = 5 * 60_000;
+const MEDIA_CACHE_TTL_MS = 10 * 60_000;
+const SNAPSHOTS_PER_KIND = 24;
+const dashboardSnapshotDirectory = join(dataDirectory, "dashboard-cache");
 const dataCache = new Map<string, CacheEntry>();
 const dataInflight = new Map<string, Promise<DashboardPayload>>();
 const mediaCache = new Map<
@@ -241,6 +252,80 @@ const videoCache = new Map<
   string,
   { expiresAt: number; value: VideoMetricsPayload }
 >();
+
+type PayloadSnapshot<T> = {
+  version: 1;
+  kind: "metrics" | "media";
+  savedAt: string;
+  range: { since: string; until: string };
+  value: T;
+};
+
+function payloadSnapshotPath(
+  kind: "metrics" | "media",
+  range: { since: string; until: string },
+): string {
+  return join(
+    dashboardSnapshotDirectory,
+    `${kind}_${range.since}_${range.until}.json`,
+  );
+}
+
+async function readPayloadSnapshot<T extends { generatedAt: string }>(
+  kind: "metrics" | "media",
+  range: { since: string; until: string },
+): Promise<{ savedAt: number; value: T } | null> {
+  try {
+    const parsed = JSON.parse(
+      await readFile(payloadSnapshotPath(kind, range), "utf8"),
+    ) as PayloadSnapshot<T>;
+    const savedAt = Date.parse(parsed.savedAt);
+    if (
+      parsed.version !== 1 ||
+      parsed.kind !== kind ||
+      parsed.range.since !== range.since ||
+      parsed.range.until !== range.until ||
+      !Number.isFinite(savedAt) ||
+      !parsed.value?.generatedAt
+    ) {
+      return null;
+    }
+    return { savedAt, value: parsed.value };
+  } catch {
+    return null;
+  }
+}
+
+async function writePayloadSnapshot<T>(
+  kind: "metrics" | "media",
+  range: { since: string; until: string },
+  value: T,
+): Promise<void> {
+  await mkdir(dashboardSnapshotDirectory, { recursive: true });
+  const path = payloadSnapshotPath(kind, range);
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const snapshot: PayloadSnapshot<T> = {
+    version: 1,
+    kind,
+    savedAt: new Date().toISOString(),
+    range,
+    value,
+  };
+  await writeFile(temporary, `${JSON.stringify(snapshot)}\n`, {
+    mode: 0o600,
+  });
+  await rename(temporary, path);
+  const older = (await readdir(dashboardSnapshotDirectory))
+    .filter((name) => name.startsWith(`${kind}_`) && name.endsWith(".json"))
+    .sort()
+    .reverse()
+    .slice(SNAPSHOTS_PER_KIND);
+  await Promise.all(
+    older.map((name) =>
+      unlink(join(dashboardSnapshotDirectory, name)).catch(() => undefined),
+    ),
+  );
+}
 
 type DeliveryMetrics = {
   spend: number;
@@ -384,13 +469,11 @@ function resolveRange(url: URL): { since: string; until: string } {
   return defaultDateRange(rawDays);
 }
 
-async function buildPayload(range: {
+async function refreshPayload(range: {
   since: string;
   until: string;
-}, force = false): Promise<DashboardPayload> {
+}): Promise<DashboardPayload> {
   const key = `${range.since}:${range.until}`;
-  const cached = dataCache.get(key);
-  if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
   const pending = dataInflight.get(key);
   if (pending) return pending;
 
@@ -448,20 +531,60 @@ async function buildPayload(range: {
       dataHealth,
       warnings: [],
     };
-    dataCache.set(key, { expiresAt: Date.now() + 5 * 60_000, value });
+    dataCache.set(key, {
+      expiresAt: Date.now() + DASHBOARD_CACHE_TTL_MS,
+      value,
+    });
+    try {
+      await writePayloadSnapshot("metrics", range, value);
+    } catch (error) {
+      process.stderr.write(
+        `Dashboard metrics snapshot failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
     return value;
   })().finally(() => dataInflight.delete(key));
   dataInflight.set(key, promise);
   return promise;
 }
 
-async function buildMediaPayload(
+async function buildPayload(
   range: { since: string; until: string },
   force = false,
+): Promise<DashboardPayload> {
+  if (force) return refreshPayload(range);
+  const key = `${range.since}:${range.until}`;
+  let cached = dataCache.get(key);
+  if (!cached) {
+    const snapshot = await readPayloadSnapshot<DashboardPayload>(
+      "metrics",
+      range,
+    );
+    if (snapshot) {
+      cached = {
+        expiresAt: snapshot.savedAt + DASHBOARD_CACHE_TTL_MS,
+        value: snapshot.value,
+      };
+      dataCache.set(key, cached);
+    }
+  }
+  if (cached) {
+    if (cached.expiresAt <= Date.now()) {
+      void refreshPayload(range).catch((error: unknown) => {
+        process.stderr.write(
+          `Dashboard metrics refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+    }
+    return cached.value;
+  }
+  return refreshPayload(range);
+}
+
+async function refreshMediaPayload(
+  range: { since: string; until: string },
 ): Promise<MediaPayload> {
   const key = `${range.since}:${range.until}`;
-  const cached = mediaCache.get(key);
-  if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
   const pending = mediaInflight.get(key);
   if (pending) return pending;
 
@@ -571,13 +694,50 @@ async function buildMediaPayload(
       warnings,
     };
     mediaCache.set(key, {
-      expiresAt: Date.now() + 10 * 60_000,
+      expiresAt: Date.now() + MEDIA_CACHE_TTL_MS,
       value,
     });
+    try {
+      await writePayloadSnapshot("media", range, value);
+    } catch (error) {
+      process.stderr.write(
+        `Dashboard media snapshot failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
     return value;
   })().finally(() => mediaInflight.delete(key));
   mediaInflight.set(key, promise);
   return promise;
+}
+
+async function buildMediaPayload(
+  range: { since: string; until: string },
+  force = false,
+): Promise<MediaPayload> {
+  if (force) return refreshMediaPayload(range);
+  const key = `${range.since}:${range.until}`;
+  let cached = mediaCache.get(key);
+  if (!cached) {
+    const snapshot = await readPayloadSnapshot<MediaPayload>("media", range);
+    if (snapshot) {
+      cached = {
+        expiresAt: snapshot.savedAt + MEDIA_CACHE_TTL_MS,
+        value: snapshot.value,
+      };
+      mediaCache.set(key, cached);
+    }
+  }
+  if (cached) {
+    if (cached.expiresAt <= Date.now()) {
+      void refreshMediaPayload(range).catch((error: unknown) => {
+        process.stderr.write(
+          `Dashboard media refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+    }
+    return cached.value;
+  }
+  return refreshMediaPayload(range);
 }
 
 async function buildEnrichedPayload(
