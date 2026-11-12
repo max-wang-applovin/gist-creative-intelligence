@@ -1,0 +1,31 @@
+name: Apply forced refresh speed fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/forced-refresh-fix.patch.gz.b64
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply verified patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/forced-refresh-fix.patch.gz.b64 | gzip --decompress > /tmp/forced-refresh-fix.patch
+          git apply --check /tmp/forced-refresh-fix.patch
+          git apply /tmp/forced-refresh-fix.patch
+          rm .github/forced-refresh-fix.patch.gz.b64 .github/workflows/apply-forced-refresh-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Keep forced Adjust refreshes fast"
+          git push origin HEAD:main
