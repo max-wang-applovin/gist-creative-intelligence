@@ -6,6 +6,7 @@ const state = {
   initialDetailApplied: false,
   loading: false,
   selected: null,
+  compareIds: new Set(),
   detail: null,
   page: "library",
   analysis: null,
@@ -267,6 +268,173 @@ function renderSummary() {
     .join("");
 }
 
+const metricDefinitions = [
+  ["Spend", "Adjust network_cost", "Sum of attributed media cost for the selected population and date range."],
+  ["CTR", "Meta / Adjust delivery", "Clicks ÷ impressions × 100."],
+  ["CPM", "Meta / Adjust delivery", "Spend ÷ impressions × 1,000."],
+  ["CPI", "Adjust", "Spend ÷ installs."],
+  ["CVR", "Adjust", "Installs ÷ clicks × 100."],
+  ["CPSU", "Adjust", "Spend ÷ post-install account-created events."],
+  ["D1 / D3 / D7", "Adjust mature cohorts", "Retained users ÷ installs from fully matured UTC calendar cohorts. Immature cohorts are excluded."],
+  ["Cost per retained user", "Adjust mature cohorts", "Spend from the same mature cohort ÷ retained users. This avoids charging immature spend against a mature numerator."],
+  ["Hook rate", "Meta video insights", "Three-second video views ÷ impressions."],
+  ["Hold rate", "Meta video insights", "ThruPlays ÷ three-second video views."],
+  ["Testing verdict", "Creative Intelligence", "Testing-only retained-user efficiency. Scaled delivery never changes the original verdict."],
+];
+
+function renderDataHealth() {
+  const health = state.payload?.dataHealth;
+  if (!health) return;
+  const coverage = health.coverage;
+  const banner = $("dataHealthBanner");
+  banner.className = `data-health-banner ${health.status}`;
+  banner.innerHTML =
+    `<span></span><strong>${health.status === "healthy" ? "Data healthy" : "Data degraded"}</strong>` +
+    `<small>${coverage.creativesWithPreview}/${coverage.creatives} previews · ${coverage.previewSpendPct.toFixed(1)}% spend covered · ${coverage.matureD7Creatives} mature D7</small>`;
+  banner.classList.remove("hidden");
+}
+
+function renderMetricDictionary() {
+  const health = state.payload?.dataHealth;
+  const healthMarkup = health
+    ? `<section class="metric-health">
+        <h3>Current data health</h3>
+        <div><span>Adjust</span><strong>${health.sources.adjust}</strong></div>
+        <div><span>Meta</span><strong>${health.sources.meta}</strong></div>
+        <div><span>AdManage</span><strong>${health.sources.adManage}</strong></div>
+        <div><span>Matched ads</span><strong>${integer(health.coverage.matchedAds)}/${integer(health.coverage.ads)}</strong></div>
+        <div><span>Preview spend coverage</span><strong>${pct(health.coverage.previewSpendPct)}</strong></div>
+        <div><span>Mature D1 / D3 / D7</span><strong>${integer(health.coverage.matureD1Creatives)} / ${integer(health.coverage.matureD3Creatives)} / ${integer(health.coverage.matureD7Creatives)}</strong></div>
+      </section>`
+    : "";
+  $("metricDictionary").innerHTML =
+    healthMarkup +
+    `<div class="metric-definition-list">${metricDefinitions
+      .map(
+        ([metric, source, definition]) => `<section>
+          <h3>${escapeHtml(metric)}</h3>
+          <span>${escapeHtml(source)}</span>
+          <p>${escapeHtml(definition)}</p>
+        </section>`,
+      )
+      .join("")}</div>`;
+}
+
+function renderCompareTray() {
+  const count = state.compareIds.size;
+  $("compareTray").classList.toggle("hidden", count === 0);
+  $("compareCount").textContent = `${count} creative${count === 1 ? "" : "s"} pinned`;
+  $("compareNowButton").disabled = count < 2;
+}
+
+function openComparison() {
+  const rows = [...state.compareIds]
+    .map((creativeId) =>
+      state.payload?.creatives.find((row) => row.creativeId === creativeId),
+    )
+    .filter(Boolean);
+  if (rows.length < 2) return;
+  const metrics = [
+    ["Spend", (row) => money(row.metaSpend)],
+    ["Impressions", (row) => integer(row.metaImpressions)],
+    ["Clicks", (row) => integer(row.metaClicks)],
+    ["Installs", (row) => integer(row.adjustInstalls)],
+    ["CPM", (row) => money(row.metaCpm)],
+    ["CTR", (row) => pct(row.metaCtr)],
+    ["CPI", (row) => money(row.cpi)],
+    ["CVR", (row) => pct(row.cvr)],
+    ["D1", (row) => retentionPct(row.adjustRetentionD1, row.adjustRetentionDenD1)],
+    ["D3", (row) => retentionPct(row.adjustRetentionD3, row.adjustRetentionDenD3)],
+    ["D7", (row) => retentionPct(row.adjustRetentionD7, row.adjustRetentionDenD7)],
+  ];
+  state.detail = null;
+  state.debriefDetail = null;
+  $("dialogContent").innerHTML = `
+    <div class="compare-shell">
+      <header class="detail-header"><strong>Creative comparison</strong><div>${rows.length} pinned</div></header>
+      <div class="compare-scroll">
+        <table class="compare-table">
+          <thead><tr><th>Metric</th>${rows
+            .map((row) => {
+              const thumb = safeUrl(row.media[0]?.thumbnailUrl);
+              return `<th>${thumb ? `<img src="${escapeHtml(thumb)}" alt="" />` : ""}<strong>${escapeHtml(row.creativeName)}</strong></th>`;
+            })
+            .join("")}</tr></thead>
+          <tbody>${metrics
+            .map(
+              ([label, valueFor]) =>
+                `<tr><th>${label}</th>${rows.map((row) => `<td>${valueFor(row)}</td>`).join("")}</tr>`,
+            )
+            .join("")}</tbody>
+        </table>
+      </div>
+    </div>`;
+  if (!dialog.open) dialog.showModal();
+}
+
+function exportFilteredCsv() {
+  const rows = filteredRows();
+  const headers = [
+    "Creative",
+    "Meta aliases",
+    "Spend",
+    "Impressions",
+    "Clicks",
+    "Installs",
+    "CPM",
+    "CTR",
+    "CPC",
+    "CPI",
+    "CVR",
+    "D1",
+    "D1 retained",
+    "D1 mature N",
+    "D3",
+    "D3 retained",
+    "D3 mature N",
+    "D7",
+    "D7 retained",
+    "D7 mature N",
+  ];
+  const values = rows.map((row) => [
+    row.creativeName,
+    (row.metaCreativeNames || []).join(" | "),
+    row.metaSpend,
+    row.metaImpressions,
+    row.metaClicks,
+    row.adjustInstalls,
+    row.metaCpm,
+    row.metaCtr,
+    row.metaCpc,
+    row.cpi,
+    row.cvr,
+    row.adjustRetentionDenD1 > 0 ? row.adjustRetentionD1 : "",
+    row.adjustRetainedD1,
+    row.adjustRetentionDenD1,
+    row.adjustRetentionDenD3 > 0 ? row.adjustRetentionD3 : "",
+    row.adjustRetainedD3,
+    row.adjustRetentionDenD3,
+    row.adjustRetentionDenD7 > 0 ? row.adjustRetentionD7 : "",
+    row.adjustRetainedD7,
+    row.adjustRetentionDenD7,
+  ]);
+  const csv = [headers, ...values]
+    .map((line) =>
+      line
+        .map((value) => `"${String(value ?? "").replaceAll('"', '""')}"`)
+        .join(","),
+    )
+    .join("\\n");
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(
+    new Blob([csv], { type: "text/csv;charset=utf-8" }),
+  );
+  link.download =
+    `creative-intelligence-${state.payload?.range.since}-${state.payload?.range.until}.csv`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
 function render() {
   const rows = filteredRows();
   $("resultCount").textContent = `${rows.length} of ${
@@ -304,6 +472,7 @@ function render() {
             </div>
             <div class="card-footer">
               <span class="status-pill ${watch ? "watch" : ""}">${status}</span>
+              <button class="compare-button ${state.compareIds.has(row.creativeId) ? "active" : ""}" data-compare="${escapeHtml(row.creativeId)}">${state.compareIds.has(row.creativeId) ? "Pinned" : "Pin"}</button>
               <button class="details-button" data-details="${escapeHtml(row.creativeId)}">Full metrics →</button>
             </div>
           </div>
@@ -329,12 +498,25 @@ function render() {
       void openDetail(button.dataset.details);
     });
   });
+  grid.querySelectorAll("[data-compare]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const creativeId = button.dataset.compare;
+      if (state.compareIds.has(creativeId)) {
+        state.compareIds.delete(creativeId);
+      } else if (state.compareIds.size < 5) {
+        state.compareIds.add(creativeId);
+      }
+      render();
+    });
+  });
   grid.querySelectorAll(".creative-card").forEach((card) => {
     card.addEventListener("click", (event) => {
       if (event.target.closest("button")) return;
       void openDetail(card.dataset.creative);
     });
   });
+  renderCompareTray();
 }
 
 async function playPreview(frame, adId) {
@@ -1066,6 +1248,7 @@ async function loadData(force = false) {
     if (!response.ok) throw new Error(data.error || "Could not load creatives");
     state.payload = data;
     renderSummary();
+    renderDataHealth();
     render();
     $("freshness").textContent = `${data.range.since} → ${data.range.until} · ${data.source} · ${data.adjustApp || "Adjust"}`;
     if (data.warnings?.length) {
@@ -3210,6 +3393,26 @@ $("datePreset").addEventListener("change", () => {
 });
 $("applyDates").addEventListener("click", () => void loadData());
 $("refreshButton").addEventListener("click", () => void loadData(true));
+$("exportCsvButton").addEventListener("click", exportFilteredCsv);
+$("compareNowButton").addEventListener("click", openComparison);
+$("clearCompareButton").addEventListener("click", () => {
+  state.compareIds.clear();
+  render();
+});
+[$("metricDictionaryButton"), $("dataHealthBanner")].forEach((button) => {
+  button.addEventListener("click", () => {
+    renderMetricDictionary();
+    $("metricDictionaryDialog").showModal();
+  });
+});
+$("closeMetricDictionary").addEventListener("click", () =>
+  $("metricDictionaryDialog").close(),
+);
+$("metricDictionaryDialog").addEventListener("click", (event) => {
+  if (event.target === $("metricDictionaryDialog")) {
+    $("metricDictionaryDialog").close();
+  }
+});
 $("closeDialog").addEventListener("click", () => dialog.close());
 dialog.addEventListener("close", () => {
   state.detail = null;

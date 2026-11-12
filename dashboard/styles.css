@@ -70,6 +70,10 @@ h1 { margin: 0; font-size: 22px; letter-spacing: -.03em; }
 .tab.active { color: var(--text); font-weight: 700; }
 .tab.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--accent); }
 .tab:disabled { opacity: .45; cursor: default; }
+.data-health-banner { width: 100%; display: flex; align-items: center; gap: 8px; margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; background: var(--panel); color: var(--text); text-align: left; }
+.data-health-banner > span { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.data-health-banner.degraded > span { background: var(--warn); }
+.data-health-banner small { margin-left: auto; color: var(--muted); }
 
 .filter-panel { padding: 18px 0 14px; border-bottom: 1px solid var(--border-soft); }
 .filter-row { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
@@ -153,6 +157,11 @@ select:focus, input:focus { border-color: var(--accent); }
 .status-pill.watch { color: var(--warn); background: rgba(243,180,93,.1); }
 .details-button { border: 0; background: transparent; color: var(--muted); font-size: 11px; padding: 4px; }
 .details-button:hover { color: var(--text); }
+.compare-button { border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px; background: transparent; color: var(--muted); font-size: 10px; }
+.compare-button.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.compare-tray { position: fixed; z-index: 30; right: 24px; bottom: 20px; display: flex; align-items: center; gap: 8px; border: 1px solid #454b52; border-radius: 10px; padding: 9px 10px; background: #202429; box-shadow: 0 12px 35px rgba(0,0,0,.35); }
+.compare-tray span { margin-right: 5px; font-size: 11px; }
+.compare-tray button:disabled { opacity: .45; cursor: default; }
 
 .analysis-page {
   margin-top: 16px; padding: 22px; border-radius: 13px;
@@ -428,6 +437,28 @@ dialog {
   border: 1px solid #d8dce1; border-radius: 14px; padding: 0; overflow: hidden;
 }
 dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
+.metric-dialog { width: min(900px, calc(100vw - 28px)); height: min(760px, calc(100vh - 28px)); }
+.metric-dialog-content { height: 100%; overflow: auto; padding: 22px; }
+.metric-dialog-content header { margin-bottom: 14px; }
+.metric-dialog-content h2 { margin: 0; }
+.metric-health { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; margin-bottom: 14px; padding: 13px; border: 1px solid #dfe3e7; border-radius: 9px; background: white; }
+.metric-health h3 { grid-column: 1 / -1; margin: 0 0 4px; font-size: 12px; }
+.metric-health div { padding: 8px; border-radius: 7px; background: #f4f7fb; }
+.metric-health span { display: block; color: #75808b; font-size: 8px; text-transform: uppercase; }
+.metric-health strong { display: block; margin-top: 3px; font-size: 11px; text-transform: capitalize; }
+.metric-definition-list { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.metric-definition-list section { padding: 12px; border: 1px solid #dfe3e7; border-radius: 9px; background: white; }
+.metric-definition-list h3 { margin: 0; font-size: 12px; }
+.metric-definition-list span { display: block; margin-top: 2px; color: #3478df; font-size: 8px; text-transform: uppercase; }
+.metric-definition-list p { margin: 7px 0 0; color: #5f6974; font-size: 10px; }
+.compare-shell { height: 100%; display: grid; grid-template-rows: 52px minmax(0,1fr); }
+.compare-scroll { min-width: 0; overflow: auto; padding: 16px; }
+.compare-table { min-width: 100%; border-collapse: collapse; background: white; font-size: 10px; }
+.compare-table th, .compare-table td { min-width: 150px; padding: 10px; border: 1px solid #e5e8eb; text-align: right; }
+.compare-table th:first-child { position: sticky; z-index: 2; left: 0; min-width: 110px; background: #f2f5f8; text-align: left; }
+.compare-table thead th { vertical-align: bottom; text-align: left; }
+.compare-table thead img { display: block; width: 90px; height: 112px; margin-bottom: 7px; border-radius: 6px; object-fit: cover; }
+.compare-table thead strong { display: block; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
 .dialog-close { position: absolute; z-index: 20; top: 9px; right: 10px; width: 32px; height: 32px; border-radius: 8px; border: 1px solid #d8dce1; background: white; color: #303740; font-size: 20px; }
 .detail-shell { height: 100%; display: grid; grid-template-rows: 52px minmax(0,1fr); }
 .detail-header { display: flex; align-items: center; justify-content: space-between; padding: 0 54px 0 16px; background: white; border-bottom: 1px solid #e0e3e7; }
@@ -525,6 +556,8 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(3px); }
   .debrief-learning-grid { grid-template-columns: 1fr; }
   .learning-cpsu-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .freshness { display: none; }
+  .metric-definition-list, .metric-health { grid-template-columns: 1fr; }
+  .metric-health h3 { grid-column: 1; }
 }
 @media (max-width: 560px) {
   .creative-grid { grid-template-columns: 1fr; }

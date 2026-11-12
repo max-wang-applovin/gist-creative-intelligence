@@ -184,6 +184,25 @@ type DashboardPayload = {
   adjustApp: string | null;
   totals: ReturnType<typeof summarizeBoard>;
   creatives: ApiCreative[];
+  dataHealth: {
+    status: "healthy" | "degraded";
+    sources: {
+      adjust: "live" | "fixture";
+      meta: "live" | "error";
+      adManage: "live" | "unconfigured" | "error";
+    };
+    coverage: {
+      creatives: number;
+      ads: number;
+      matchedAds: number;
+      unmatchedAds: number;
+      creativesWithPreview: number;
+      previewSpendPct: number;
+      matureD1Creatives: number;
+      matureD3Creatives: number;
+      matureD7Creatives: number;
+    };
+  };
   warnings: string[];
 };
 
@@ -359,9 +378,12 @@ async function buildPayload(range: {
   const board = buildHelperCompatibleDashboard(adjust.rows, maxScanLimit);
   const warnings: string[] = [];
   let mediaByAd: Record<string, MetaAdMedia> = {};
+  let metaFailed = false;
+  let adManageFailed = false;
   try {
     mediaByAd = await fetchMetaAdMedia(board.flatMap((row) => row.adIds));
   } catch (error) {
+    metaFailed = true;
     warnings.push(
       `Media previews unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -384,6 +406,7 @@ async function buildPayload(range: {
       }
     }
   } catch (error) {
+    adManageFailed = true;
     warnings.push(
       `High-resolution asset fallback unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -396,6 +419,48 @@ async function buildPayload(range: {
       .filter((media): media is MetaAdMedia => media !== undefined),
   }));
   const withSpend = creatives.filter((row) => row.metaSpend > 0);
+  const adIds = [...new Set(board.flatMap((row) => row.adIds))];
+  const matchedAds = adIds.filter((adId) => mediaByAd[adId]).length;
+  const previewCreatives = withSpend.filter((row) => row.media.length > 0);
+  const totalSpend = withSpend.reduce((sum, row) => sum + row.metaSpend, 0);
+  const previewSpend = previewCreatives.reduce(
+    (sum, row) => sum + row.metaSpend,
+    0,
+  );
+  const round2 = (number: number) => Math.round(number * 100) / 100;
+  const dataHealth: DashboardPayload["dataHealth"] = {
+    status:
+      adjust.source === "live" && !metaFailed && warnings.length === 0
+        ? "healthy"
+        : "degraded",
+    sources: {
+      adjust: adjust.source,
+      meta: metaFailed ? "error" : "live",
+      adManage: !process.env.ADMANAGE_API_KEY?.trim()
+        ? "unconfigured"
+        : adManageFailed
+          ? "error"
+          : "live",
+    },
+    coverage: {
+      creatives: withSpend.length,
+      ads: adIds.length,
+      matchedAds,
+      unmatchedAds: adIds.length - matchedAds,
+      creativesWithPreview: previewCreatives.length,
+      previewSpendPct:
+        totalSpend > 0 ? round2((previewSpend / totalSpend) * 100) : 0,
+      matureD1Creatives: withSpend.filter(
+        (row) => row.adjustRetentionDenD1 > 0,
+      ).length,
+      matureD3Creatives: withSpend.filter(
+        (row) => row.adjustRetentionDenD3 > 0,
+      ).length,
+      matureD7Creatives: withSpend.filter(
+        (row) => row.adjustRetentionDenD7 > 0,
+      ).length,
+    },
+  };
   const value: DashboardPayload = {
     source: adjust.source,
     range,
@@ -409,6 +474,7 @@ async function buildPayload(range: {
     adjustApp: adjust.appName,
     totals: summarizeBoard(withSpend),
     creatives,
+    dataHealth,
     warnings,
   };
   dataCache.set(key, { expiresAt: Date.now() + 5 * 60_000, value });

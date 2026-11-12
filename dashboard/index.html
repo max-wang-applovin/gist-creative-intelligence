@@ -27,6 +27,7 @@
           </div>
           <div class="topbar-actions">
             <span id="freshness" class="freshness">Loading live data…</span>
+            <button id="metricDictionaryButton" class="button" title="Metric definitions">Definitions</button>
             <button id="refreshButton" class="icon-button" title="Refresh">↻</button>
           </div>
         </header>
@@ -37,6 +38,7 @@
           <button class="tab" data-page="inspiration">Competitor Inspo</button>
           <button class="tab" data-page="debrief">Test Debrief</button>
         </section>
+        <button id="dataHealthBanner" class="data-health-banner hidden" type="button"></button>
 
         <div id="libraryPage">
         <section class="filter-panel" aria-label="Filters">
@@ -128,6 +130,7 @@
               </select>
             </label>
             <div class="group-chip"><span>Group by</span> Adjust creative</div>
+            <button id="exportCsvButton" class="button">Export CSV</button>
             <div id="resultCount" class="result-count">— results</div>
           </div>
         </section>
@@ -140,6 +143,11 @@
           <p>Joining creative performance and media…</p>
         </div>
         <section id="creativeGrid" class="creative-grid" aria-live="polite"></section>
+        <div id="compareTray" class="compare-tray hidden">
+          <span id="compareCount">0 creatives pinned</span>
+          <button id="compareNowButton" class="button">Compare</button>
+          <button id="clearCompareButton" class="button">Clear</button>
+        </div>
         </div>
 
         <section id="analysisPage" class="analysis-page hidden">
@@ -423,6 +431,13 @@
     <dialog id="detailDialog">
       <button id="closeDialog" class="dialog-close" aria-label="Close">×</button>
       <div id="dialogContent"></div>
+    </dialog>
+    <dialog id="metricDictionaryDialog" class="metric-dialog">
+      <button id="closeMetricDictionary" class="dialog-close" aria-label="Close">×</button>
+      <div class="metric-dialog-content">
+        <header><p class="eyebrow">DATA DEFINITIONS</p><h2>Metric dictionary and lineage</h2></header>
+        <div id="metricDictionary"></div>
+      </div>
     </dialog>
 
     <script type="module" src="/app.js"></script>
