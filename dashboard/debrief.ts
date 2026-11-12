@@ -71,6 +71,7 @@ export type DebriefStageMetrics = {
 };
 
 export type DebriefCreative = {
+  creativeId: string;
   name: string;
   readableName: string;
   creator: string | null;
@@ -1116,6 +1117,7 @@ async function buildDebrief(range: {
         testing.spend >= DECISION_MIN_SPEND_AT_DAYS);
 
     tested.push({
+      creativeId: acc.key,
       name: acc.name,
       readableName: parsed.readableName,
       creator: parsed.creator,

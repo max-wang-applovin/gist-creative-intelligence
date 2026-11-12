@@ -75,36 +75,57 @@ function operatingSystem(impressionDevice: string | undefined): string {
   return "other";
 }
 
+function chunks<T>(values: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
+  return result;
+}
+
 /** Read ad-level Meta delivery split by one supported audience dimension. */
 export async function fetchMetaDeliveryBreakdown(
   range: DateRange,
   dimension: MetaBreakdownDimension,
+  adIds: string[] = [],
 ): Promise<MetaBreakdownRow[]> {
-  const url = new URL(
-    `https://graph.facebook.com/v21.0/${accountId()}/insights`,
-  );
-  url.searchParams.set("level", "ad");
-  url.searchParams.set("fields", "ad_id,spend,impressions,clicks");
-  url.searchParams.set("breakdowns", breakdowns(dimension));
-  url.searchParams.set("time_range", JSON.stringify(range));
-  url.searchParams.set("limit", "500");
-  url.searchParams.set("access_token", token());
-
+  const ids = [...new Set(adIds.filter((id) => /^\d+$/.test(id)))];
+  if (adIds.length > 0 && ids.length === 0) return [];
+  const batches: Array<string[] | undefined> =
+    ids.length > 0 ? chunks(ids, 200) : [undefined];
   const raw: GraphBreakdownRow[] = [];
-  let next: string | undefined = url.toString();
-  let pages = 0;
-  while (next && pages < 50) {
-    pages += 1;
-    const response = await fetch(next);
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(
-        `Meta ${dimension} breakdown ${response.status}: ${body.slice(0, 300)}`,
+  for (const batch of batches) {
+    const url = new URL(
+      `https://graph.facebook.com/v21.0/${accountId()}/insights`,
+    );
+    url.searchParams.set("level", "ad");
+    url.searchParams.set("fields", "ad_id,spend,impressions,clicks");
+    url.searchParams.set("breakdowns", breakdowns(dimension));
+    url.searchParams.set("time_range", JSON.stringify(range));
+    if (batch) {
+      url.searchParams.set(
+        "filtering",
+        JSON.stringify([{ field: "ad.id", operator: "IN", value: batch }]),
       );
     }
-    const payload = (await response.json()) as GraphPage;
-    raw.push(...(payload.data ?? []));
-    next = payload.paging?.next;
+    url.searchParams.set("limit", "500");
+    url.searchParams.set("access_token", token());
+
+    let next: string | undefined = url.toString();
+    let pages = 0;
+    while (next && pages < 50) {
+      pages += 1;
+      const response = await fetch(next);
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(
+          `Meta ${dimension} breakdown ${response.status}: ${body.slice(0, 300)}`,
+        );
+      }
+      const payload = (await response.json()) as GraphPage;
+      raw.push(...(payload.data ?? []));
+      next = payload.paging?.next;
+    }
   }
 
   return raw

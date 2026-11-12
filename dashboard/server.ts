@@ -203,10 +203,17 @@ type DashboardDataHealth = {
   };
 };
 
+type PayloadFreshness = {
+  source: "live" | "memory" | "disk";
+  refreshing: boolean;
+  expiresAt: string;
+};
+
 type DashboardPayload = {
   source: string;
   range: { since: string; until: string };
   generatedAt: string;
+  freshness?: PayloadFreshness;
   method: string;
   retention: {
     method: string;
@@ -222,6 +229,7 @@ type DashboardPayload = {
 type MediaPayload = {
   generatedAt: string;
   range: { since: string; until: string };
+  freshness?: PayloadFreshness;
   creatives: Record<string, MetaAdMedia[]>;
   dataHealth: DashboardDataHealth;
   warnings: string[];
@@ -548,12 +556,38 @@ async function refreshPayload(range: {
   return promise;
 }
 
+function withPayloadFreshness<T extends { freshness?: PayloadFreshness }>(
+  value: T,
+  source: PayloadFreshness["source"],
+  refreshing: boolean,
+  expiresAt: number,
+): T {
+  return {
+    ...value,
+    freshness: {
+      source,
+      refreshing,
+      expiresAt: new Date(expiresAt).toISOString(),
+    },
+  };
+}
+
 async function buildPayload(
   range: { since: string; until: string },
   force = false,
 ): Promise<DashboardPayload> {
-  if (force) return refreshPayload(range);
+  if (force) {
+    const value = await refreshPayload(range);
+    return withPayloadFreshness(
+      value,
+      "live",
+      false,
+      dataCache.get(`${range.since}:${range.until}`)?.expiresAt ??
+        Date.now() + DASHBOARD_CACHE_TTL_MS,
+    );
+  }
   const key = `${range.since}:${range.until}`;
+  let source: PayloadFreshness["source"] = "memory";
   let cached = dataCache.get(key);
   if (!cached) {
     const snapshot = await readPayloadSnapshot<DashboardPayload>(
@@ -561,6 +595,7 @@ async function buildPayload(
       range,
     );
     if (snapshot) {
+      source = "disk";
       cached = {
         expiresAt: snapshot.savedAt + DASHBOARD_CACHE_TTL_MS,
         value: snapshot.value,
@@ -569,16 +604,28 @@ async function buildPayload(
     }
   }
   if (cached) {
-    if (cached.expiresAt <= Date.now()) {
+    const stale = cached.expiresAt <= Date.now();
+    if (stale) {
       void refreshPayload(range).catch((error: unknown) => {
         process.stderr.write(
           `Dashboard metrics refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
         );
       });
     }
-    return cached.value;
+    return withPayloadFreshness(
+      cached.value,
+      source,
+      stale || dataInflight.has(key),
+      cached.expiresAt,
+    );
   }
-  return refreshPayload(range);
+  const value = await refreshPayload(range);
+  return withPayloadFreshness(
+    value,
+    "live",
+    false,
+    dataCache.get(key)?.expiresAt ?? Date.now() + DASHBOARD_CACHE_TTL_MS,
+  );
 }
 
 async function refreshMediaPayload(
@@ -714,12 +761,23 @@ async function buildMediaPayload(
   range: { since: string; until: string },
   force = false,
 ): Promise<MediaPayload> {
-  if (force) return refreshMediaPayload(range);
+  if (force) {
+    const value = await refreshMediaPayload(range);
+    return withPayloadFreshness(
+      value,
+      "live",
+      false,
+      mediaCache.get(`${range.since}:${range.until}`)?.expiresAt ??
+        Date.now() + MEDIA_CACHE_TTL_MS,
+    );
+  }
   const key = `${range.since}:${range.until}`;
+  let source: PayloadFreshness["source"] = "memory";
   let cached = mediaCache.get(key);
   if (!cached) {
     const snapshot = await readPayloadSnapshot<MediaPayload>("media", range);
     if (snapshot) {
+      source = "disk";
       cached = {
         expiresAt: snapshot.savedAt + MEDIA_CACHE_TTL_MS,
         value: snapshot.value,
@@ -728,16 +786,28 @@ async function buildMediaPayload(
     }
   }
   if (cached) {
-    if (cached.expiresAt <= Date.now()) {
+    const stale = cached.expiresAt <= Date.now();
+    if (stale) {
       void refreshMediaPayload(range).catch((error: unknown) => {
         process.stderr.write(
           `Dashboard media refresh failed: ${error instanceof Error ? error.message : String(error)}\n`,
         );
       });
     }
-    return cached.value;
+    return withPayloadFreshness(
+      cached.value,
+      source,
+      stale || mediaInflight.has(key),
+      cached.expiresAt,
+    );
   }
-  return refreshMediaPayload(range);
+  const value = await refreshMediaPayload(range);
+  return withPayloadFreshness(
+    value,
+    "live",
+    false,
+    mediaCache.get(key)?.expiresAt ?? Date.now() + MEDIA_CACHE_TTL_MS,
+  );
 }
 
 async function buildEnrichedPayload(
@@ -1167,7 +1237,11 @@ async function buildSlicePayload(
     >;
   };
   const segments = new Map<string, Acc>();
-  const rows = await fetchMetaDeliveryBreakdown(range, dimension);
+  const rows = await fetchMetaDeliveryBreakdown(
+    range,
+    dimension,
+    [...creativeByAd.keys()],
+  );
   for (const row of rows) {
     const creativeId = creativeByAd.get(row.adId);
     if (!creativeId) continue;
@@ -1409,6 +1483,17 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
           owner: String(body.owner ?? "").trim().slice(0, 200),
           primaryMetric: required("primaryMetric"),
           guardrails: String(body.guardrails ?? "").trim().slice(0, 2_000),
+          creativeIds: Array.isArray(body.creativeIds)
+            ? [
+                ...new Set(
+                  body.creativeIds
+                    .map((value) => String(value).trim().slice(0, 300))
+                    .filter(Boolean),
+                ),
+              ].slice(0, 100)
+            : [],
+          testBriefId:
+            String(body.testBriefId ?? "").trim().slice(0, 200) || null,
           status: status as "Planned" | "Running" | "Decided",
           notes: String(body.notes ?? "").trim().slice(0, 5_000),
         }),
@@ -1564,7 +1649,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
             "cleaned Adjust creative label joined to Meta ad inventory",
         },
         features: debrief.all.map((creative) => ({
-          creativeId: normalizeCreativeName(creative.name),
+          creativeId: creative.creativeId,
           creativeName: creative.name,
           source: creative.source,
           format: creative.format,
@@ -1902,6 +1987,52 @@ function scheduleDebriefRefresh(): void {
   setInterval(refresh, 30 * 60_000);
 }
 
+let dashboardPrewarmRunning = false;
+
+async function prewarmDashboardWindows(): Promise<void> {
+  if (
+    dashboardPrewarmRunning ||
+    !process.env.ADJUST_API_TOKEN?.trim()
+  ) {
+    return;
+  }
+  dashboardPrewarmRunning = true;
+  try {
+    for (const days of [7, 28, 90]) {
+      const range = defaultDateRange(days);
+      try {
+        await refreshPayload(range);
+        if (days <= 28 && process.env.META_ACCESS_TOKEN?.trim()) {
+          await refreshMediaPayload(range);
+        }
+      } catch (error) {
+        process.stderr.write(
+          `Dashboard ${days}-day prewarm failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+    }
+  } finally {
+    dashboardPrewarmRunning = false;
+  }
+}
+
+function scheduleDashboardPrewarm(): void {
+  if (!process.env.ADJUST_API_TOKEN?.trim()) return;
+  setTimeout(() => void prewarmDashboardWindows(), 3 * 60_000);
+  const scheduleDaily = () => {
+    const now = new Date();
+    const next = new Date(now);
+    next.setUTCHours(0, 15, 0, 0);
+    if (next.getTime() <= now.getTime()) {
+      next.setUTCDate(next.getUTCDate() + 1);
+    }
+    setTimeout(() => {
+      void prewarmDashboardWindows().finally(scheduleDaily);
+    }, next.getTime() - now.getTime());
+  };
+  scheduleDaily();
+}
+
 const server = createServer((req, res) => {
   void handler(req, res).catch((error) => {
     json(res, 500, {
@@ -1915,6 +2046,7 @@ await mkdir(dataDirectory, { recursive: true });
 server.listen(port, host, () => {
   scheduleNextAutoScan();
   scheduleDebriefRefresh();
+  scheduleDashboardPrewarm();
   const displayHost = host === "0.0.0.0" ? "localhost" : host;
   process.stdout.write(
     `Creative Intelligence dashboard: http://${displayHost}:${port}\n` +

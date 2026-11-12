@@ -11,6 +11,8 @@ export type Experiment = {
   owner: string;
   primaryMetric: string;
   guardrails: string;
+  creativeIds: string[];
+  testBriefId: string | null;
   status: "Planned" | "Running" | "Decided";
   notes: string;
   createdAt: string;
@@ -61,7 +63,11 @@ export class WorkspaceStore {
       if (value.version !== 1) return emptyState();
       return {
         version: 1,
-        experiments: value.experiments ?? [],
+        experiments: (value.experiments ?? []).map((experiment) => ({
+          ...experiment,
+          creativeIds: experiment.creativeIds ?? [],
+          testBriefId: experiment.testBriefId ?? null,
+        })),
         savedReports: value.savedReports ?? [],
         testBriefs: value.testBriefs ?? [],
       };

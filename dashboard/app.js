@@ -7,6 +7,9 @@ const state = {
   initialDetailApplied: false,
   loading: false,
   mediaRequest: 0,
+  dataPollTimer: null,
+  mediaPollTimer: null,
+  mediaFreshness: null,
   selected: null,
   compareIds: new Set(),
   detail: null,
@@ -57,6 +60,34 @@ const compact = (value) =>
 const pct = (value) => `${Number(value || 0).toFixed(1)}%`;
 const retentionPct = (value, denominator) =>
   Number(denominator || 0) > 0 ? pct(value) : "—";
+
+function relativeAge(value) {
+  const seconds = Math.max(
+    0,
+    Math.floor((Date.now() - new Date(value).getTime()) / 1000),
+  );
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function renderLibraryFreshness() {
+  const data = state.payload;
+  if (!data) return;
+  const updated = new Date(data.generatedAt);
+  const freshness = data.freshness;
+  $("freshness").textContent =
+    `${data.range.since} → ${data.range.until} · ${data.adjustApp || "Adjust"} · ` +
+    `updated ${relativeAge(data.generatedAt)} (${updated.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })})` +
+    (freshness?.source === "disk" ? " · restored snapshot" : "") +
+    (freshness?.refreshing ? " · performance refreshing…" : "") +
+    (state.mediaFreshness?.refreshing ? " · previews refreshing…" : "");
+  $("freshness").title = `Generated ${updated.toLocaleString()} · ${freshness?.source || "live"} source`;
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -301,7 +332,7 @@ function renderDataHealth() {
   } else {
     banner.innerHTML =
       `<span></span><strong>${health.status === "healthy" ? "Data healthy" : "Data degraded"}</strong>` +
-      `<small>${coverage.creativesWithPreview}/${coverage.creatives} previews · ${coverage.previewSpendPct.toFixed(1)}% spend covered · ${coverage.matureD7Creatives} mature D7</small>`;
+      `<small>${coverage.creativesWithPreview}/${coverage.creatives} previews · ${coverage.previewSpendPct.toFixed(1)}% spend covered · ${coverage.matureD7Creatives} mature D7${state.mediaFreshness?.refreshing ? " · refreshing" : ""}</small>`;
   }
   banner.classList.remove("hidden");
 }
@@ -512,24 +543,130 @@ function renderWorkspace() {
       .join("") || '<div class="analysis-empty">No saved views yet.</div>';
   $("testBriefsList").innerHTML =
     state.testBriefs
-      .map(
-        (brief) => `<div class="workspace-item">
-          <div><strong>${escapeHtml(brief.title)}</strong><small>${escapeHtml(brief.sourceBrand)} · ${escapeHtml(brief.status)}</small><p>${escapeHtml(brief.hypothesis || "No hypothesis yet.")}</p></div>
-        </div>`,
-      )
+      .map((brief) => {
+        const linked = state.experiments.filter(
+          (experiment) => experiment.testBriefId === brief.id,
+        );
+        return `<div class="workspace-item">
+          <div><strong>${escapeHtml(brief.title)}</strong><small>${escapeHtml(brief.sourceBrand)} · ${escapeHtml(brief.status)} · ${linked.length} linked experiment${linked.length === 1 ? "" : "s"}</small><p>${escapeHtml(brief.hypothesis || "No hypothesis yet.")}</p></div>
+        </div>`;
+      })
       .join("") || '<div class="analysis-empty">No competitor briefs yet.</div>';
 }
 
 async function loadWorkspace() {
-  const [reportsResponse, briefsResponse] = await Promise.all([
-    fetch("/api/saved-reports"),
-    fetch("/api/test-briefs"),
-  ]);
+  const [reportsResponse, briefsResponse, experimentsResponse] =
+    await Promise.all([
+      fetch("/api/saved-reports"),
+      fetch("/api/test-briefs"),
+      fetch("/api/experiments"),
+    ]);
   const reports = await reportsResponse.json();
   const briefs = await briefsResponse.json();
+  const experiments = await experimentsResponse.json();
   state.savedReports = reports.reports || [];
   state.testBriefs = briefs.briefs || [];
+  state.experiments = experiments.experiments || [];
   renderWorkspace();
+}
+
+const experimentCreativeId = (creative) =>
+  creative.creativeId ||
+  String(creative.name || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\s*\(\d+\s*ads?\)\s*$/i, "")
+    .replace(/\s*\(\d+\)\s*$/i, "")
+    .toLowerCase();
+
+function populateExperimentLinks() {
+  const briefSelect = $("experimentTestBrief");
+  const selectedBrief = briefSelect.value;
+  briefSelect.replaceChildren();
+  appendOption(briefSelect, "", "No linked brief");
+  for (const brief of state.testBriefs) {
+    appendOption(briefSelect, brief.id, `${brief.title} · ${brief.status}`);
+  }
+  if (
+    [...briefSelect.options].some(
+      (option) => option.value === selectedBrief,
+    )
+  ) {
+    briefSelect.value = selectedBrief;
+  }
+
+  const creativeSelect = $("experimentCreativeIds");
+  const selectedCreatives = new Set(
+    [...creativeSelect.selectedOptions].map((option) => option.value),
+  );
+  creativeSelect.replaceChildren();
+  const creatives = [...(state.debrief?.all || [])].sort(
+    (a, b) =>
+      (b.uploadedDate || "").localeCompare(a.uploadedDate || "") ||
+      b.testing.spend - a.testing.spend,
+  );
+  for (const creative of creatives) {
+    const option = document.createElement("option");
+    option.value = experimentCreativeId(creative);
+    option.textContent =
+      `${creative.readableName || creative.name} · ${creative.verdict} · ` +
+      money(creative.testing.spend, true);
+    option.selected = selectedCreatives.has(option.value);
+    creativeSelect.append(option);
+  }
+}
+
+function experimentOutcome(experiment) {
+  const ids = new Set(experiment.creativeIds || []);
+  const linked = (state.debrief?.all || []).filter((creative) =>
+    ids.has(experimentCreativeId(creative)),
+  );
+  if (ids.size === 0) {
+    return {
+      label: "Not linked",
+      detail: "Select launched creatives",
+      tone: "learning",
+    };
+  }
+  if (linked.length === 0) {
+    return {
+      label: "Outside window",
+      detail: `${ids.size} linked`,
+      tone: "learning",
+    };
+  }
+  const total = (key) =>
+    linked.reduce(
+      (sum, creative) => sum + Number(creative.testing?.[key] || 0),
+      0,
+    );
+  const spend = total("spend");
+  const signups = total("signups");
+  const d7Cohort = total("d7Cohort");
+  const retainedD7 = total("retainedD7");
+  const winners = linked.filter(
+    (creative) => creative.verdict === "Winner",
+  ).length;
+  const losers = linked.filter(
+    (creative) => creative.verdict === "Loser",
+  ).length;
+  const label =
+    winners > 0 && losers === 0
+      ? "Winning"
+      : losers > 0 && winners === 0
+        ? "Losing"
+        : winners > 0 && losers > 0
+          ? "Mixed"
+          : "Learning";
+  const cpsu = signups > 0 ? spend / signups : null;
+  const d7 = d7Cohort > 0 ? (retainedD7 / d7Cohort) * 100 : null;
+  return {
+    label,
+    detail:
+      `${linked.length}/${ids.size} creatives · ${money(spend, true)} · ` +
+      `CPSU ${cpsu === null ? "—" : money(cpsu)} · D7 ${d7 === null ? "—" : pct(d7)}`,
+    tone: label.toLowerCase(),
+  };
 }
 
 function renderExperiments() {
@@ -543,15 +680,22 @@ function renderExperiments() {
   $("experimentList").innerHTML =
     state.experiments.length > 0
       ? `<table class="analysis-data-table debrief-table">
-          <thead><tr><th class="sticky-cell">Experiment</th><th>Status</th><th>Owner</th><th>Hypothesis</th><th>Primary metric</th><th>Guardrails</th><th>Confound checks</th><th>Updated</th><th></th></tr></thead>
+          <thead><tr><th class="sticky-cell">Experiment</th><th>Status</th><th>Owner</th><th>Hypothesis</th><th>Source brief</th><th>Creatives</th><th>Live outcome</th><th>Primary metric</th><th>Guardrails</th><th>Confound checks</th><th>Updated</th><th></th></tr></thead>
           <tbody>${state.experiments
             .map((experiment) => {
               const warnings = warningsFor(experiment);
+              const brief = state.testBriefs.find(
+                (item) => item.id === experiment.testBriefId,
+              );
+              const outcome = experimentOutcome(experiment);
               return `<tr>
                 <td class="sticky-cell"><strong>${escapeHtml(experiment.name)}</strong></td>
                 <td>${escapeHtml(experiment.status)}</td>
                 <td>${escapeHtml(experiment.owner || "—")}</td>
                 <td class="debrief-reasons">${escapeHtml(experiment.hypothesis)}</td>
+                <td>${escapeHtml(brief?.title || "—")}</td>
+                <td>${experiment.creativeIds?.length || 0}</td>
+                <td><span class="experiment-outcome ${escapeHtml(outcome.tone)}">${escapeHtml(outcome.label)}</span><small>${escapeHtml(outcome.detail)}</small></td>
                 <td>${escapeHtml(experiment.primaryMetric)}</td>
                 <td>${escapeHtml(experiment.guardrails || "—")}</td>
                 <td>${warnings.length ? warnings.map((warning) => `<span class="experiment-warning">${escapeHtml(warning)}</span>`).join("") : '<span class="experiment-ready">Ready</span>'}</td>
@@ -565,16 +709,27 @@ function renderExperiments() {
 }
 
 async function loadExperiments() {
-  const response = await fetch("/api/experiments");
-  const data = await response.json();
+  const [response, briefsResponse] = await Promise.all([
+    fetch("/api/experiments"),
+    fetch("/api/test-briefs"),
+  ]);
+  const [data, briefs] = await Promise.all([
+    response.json(),
+    briefsResponse.json(),
+  ]);
   if (!response.ok) throw new Error(data.error || "Experiments unavailable");
   state.experiments = data.experiments || [];
+  state.testBriefs = briefs.briefs || [];
+  populateExperimentLinks();
   renderExperiments();
 }
 
 function clearExperimentForm() {
   $("experimentForm").reset();
   $("experimentId").value = "";
+  [...$("experimentCreativeIds").options].forEach(
+    (option) => (option.selected = false),
+  );
 }
 
 async function saveExperiment(event) {
@@ -589,6 +744,10 @@ async function saveExperiment(event) {
     variants: $("experimentVariants").value,
     primaryMetric: $("experimentPrimaryMetric").value,
     guardrails: $("experimentGuardrails").value,
+    creativeIds: [...$("experimentCreativeIds").selectedOptions].map(
+      (option) => option.value,
+    ),
+    testBriefId: $("experimentTestBrief").value || null,
     notes: $("experimentNotes").value,
   };
   const response = await fetch("/api/experiments", {
@@ -1412,7 +1571,7 @@ function setActiveSlice(dimension, select) {
   render();
 }
 
-async function loadMedia(params = currentRangeParams()) {
+async function loadMedia(params = currentRangeParams(), pollAttempt = 0) {
   const requestId = ++state.mediaRequest;
   const expectedRange = state.payload?.range;
   if (!expectedRange) return;
@@ -1432,6 +1591,7 @@ async function loadMedia(params = currentRangeParams()) {
       media: data.creatives[creative.creativeId] || [],
     }));
     state.payload.dataHealth = data.dataHealth;
+    state.mediaFreshness = data.freshness || null;
     state.payload.warnings = [
       ...new Set([...(state.payload.warnings || []), ...(data.warnings || [])]),
     ];
@@ -1445,11 +1605,23 @@ async function loadMedia(params = currentRangeParams()) {
       }
     }
     renderDataHealth();
+    renderLibraryFreshness();
     render();
     if (state.analysis) renderAnalysis();
     if (state.detail) renderDetail();
     warning.textContent = state.payload.warnings.join(" ");
     warning.classList.toggle("hidden", !state.payload.warnings.length);
+    if (
+      data.freshness?.refreshing &&
+      pollAttempt < 20 &&
+      ["library", "analysis"].includes(state.page)
+    ) {
+      if (state.mediaPollTimer) clearTimeout(state.mediaPollTimer);
+      state.mediaPollTimer = setTimeout(
+        () => void loadMedia(currentRangeParams(), pollAttempt + 1),
+        5_000,
+      );
+    }
   } catch (error) {
     if (requestId !== state.mediaRequest) return;
     warning.textContent =
@@ -1460,9 +1632,64 @@ async function loadMedia(params = currentRangeParams()) {
   }
 }
 
+function scheduleLibraryPoll(previousGeneratedAt, attempt = 0) {
+  if (state.dataPollTimer) clearTimeout(state.dataPollTimer);
+  if (
+    attempt >= 20 ||
+    !["library", "analysis"].includes(state.page)
+  ) {
+    return;
+  }
+  state.dataPollTimer = setTimeout(async () => {
+    try {
+      const response = await fetch(`/api/creatives?${currentRangeParams()}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Refresh unavailable");
+      const current = state.payload;
+      if (
+        !current ||
+        current.range.since !== data.range.since ||
+        current.range.until !== data.range.until
+      ) {
+        return;
+      }
+      if (data.generatedAt !== previousGeneratedAt) {
+        const media = new Map(
+          current.creatives.map((creative) => [
+            creative.creativeId,
+            creative.media,
+          ]),
+        );
+        state.payload = {
+          ...data,
+          creatives: data.creatives.map((creative) => ({
+            ...creative,
+            media: media.get(creative.creativeId) || [],
+          })),
+        };
+        renderSummary();
+        renderDataHealth();
+        renderLibraryFreshness();
+        render();
+        void loadMedia();
+        return;
+      }
+      if (data.freshness?.refreshing) {
+        scheduleLibraryPoll(previousGeneratedAt, attempt + 1);
+      }
+    } catch {
+      scheduleLibraryPoll(previousGeneratedAt, attempt + 1);
+    }
+  }, 5_000);
+}
+
 async function loadData(force = false) {
   if (state.loading) return;
   state.loading = true;
+  if (state.dataPollTimer) clearTimeout(state.dataPollTimer);
+  if (state.mediaPollTimer) clearTimeout(state.mediaPollTimer);
+  state.mediaRequest += 1;
+  state.mediaFreshness = null;
   loading.classList.remove("hidden");
   grid.innerHTML = "";
   warning.classList.add("hidden");
@@ -1476,8 +1703,8 @@ async function loadData(force = false) {
     state.payload = data;
     renderSummary();
     renderDataHealth();
+    renderLibraryFreshness();
     render();
-    $("freshness").textContent = `${data.range.since} → ${data.range.until} · ${data.source} · ${data.adjustApp || "Adjust"}`;
     if (data.warnings?.length) {
       warning.textContent = data.warnings.join(" ");
       warning.classList.remove("hidden");
@@ -1488,6 +1715,9 @@ async function loadData(force = false) {
       ([, config]) => initialQuery.get(config.parameter),
     );
     if (initialSlice) void loadSlice(initialSlice[0], params);
+    if (data.freshness?.refreshing) {
+      scheduleLibraryPoll(data.generatedAt);
+    }
     if (!state.initialDetailApplied) {
       state.initialDetailApplied = true;
       const creativeId = new URLSearchParams(window.location.search).get(
@@ -3468,6 +3698,8 @@ function renderDebrief() {
     sourceSelect.value = selected;
   }
   renderDebriefAll();
+  populateExperimentLinks();
+  if (state.experiments.length) renderExperiments();
   setDebriefSection(state.debriefSection);
 
   $("debriefWarning").textContent = data.warnings.join(" ");
@@ -3737,6 +3969,11 @@ $("experimentList").addEventListener("click", (event) => {
     $("experimentVariants").value = experiment.variants;
     $("experimentPrimaryMetric").value = experiment.primaryMetric;
     $("experimentGuardrails").value = experiment.guardrails;
+    $("experimentTestBrief").value = experiment.testBriefId || "";
+    const linked = new Set(experiment.creativeIds || []);
+    [...$("experimentCreativeIds").options].forEach(
+      (option) => (option.selected = linked.has(option.value)),
+    );
     $("experimentNotes").value = experiment.notes;
     return;
   }
@@ -3911,3 +4148,4 @@ switchPage(
     ? initialPage
     : "library",
 );
+setInterval(renderLibraryFreshness, 30_000);
